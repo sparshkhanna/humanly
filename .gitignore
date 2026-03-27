@@ -1,0 +1,29 @@
+# Virtual environment
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Session logs (contain local activity data)
+logs/
+
+# Generated scratch files (typed by automation)
+scratch/
+
+# Screenshots captured during runs
+screenshots/
+
+# Claude Code local config
+.claude/
+
+# Build artifacts
+.dist/
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
