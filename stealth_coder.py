@@ -627,1195 +627,1817 @@ def ensure_windsurf_focus():
 
 CODE_TEMPLATES = [
     # ══════════════════════════════════════════════════════════════
-    # REALISTIC WORK TEMPLATES — Backend (Node/Express, FastAPI, Go)
-    #                             Frontend (React, Next.js, Vue)
+    # REALISTIC WORK TEMPLATES — Django + FastAPI Project
     # ══════════════════════════════════════════════════════════════
 
-    # ── Express: User CRUD routes ──
-    {
-        "filename": "userRoutes.js",
-        "code": """\
-const express = require("express");
-const router = express.Router();
-const { authenticate } = require("../middleware/auth");
-const UserService = require("../services/userService");
-
-router.get("/api/users", authenticate, async (req, res) => {
-  try {
-    const { page = 1, limit = 20, search } = req.query;
-    const users = await UserService.getUsers({
-      page: parseInt(page),
-      limit: parseInt(limit),
-      search,
-      orgId: req.user.orgId,
-    });
-    res.json({ success: true, data: users });
-  } catch (err) {
-    console.error("GET /api/users failed:", err.message);
-    res.status(500).json({ success: false, error: "Failed to fetch users" });
-  }
-});
-
-router.get("/api/users/:id", authenticate, async (req, res) => {
-  try {
-    const user = await UserService.getUserById(req.params.id);
-    if (!user) {
-      return res.status(404).json({ success: false, error: "User not found" });
-    }
-    res.json({ success: true, data: user });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-router.post("/api/users", authenticate, async (req, res) => {
-  try {
-    const { email, name, role } = req.body;
-    if (!email || !name) {
-      return res.status(400).json({ success: false, error: "Email and name required" });
-    }
-    const user = await UserService.createUser({ email, name, role, orgId: req.user.orgId });
-    res.status(201).json({ success: true, data: user });
-  } catch (err) {
-    if (err.code === "DUPLICATE_EMAIL") {
-      return res.status(409).json({ success: false, error: "Email already exists" });
-    }
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-router.patch("/api/users/:id", authenticate, async (req, res) => {
-  try {
-    const updates = req.body;
-    const user = await UserService.updateUser(req.params.id, updates);
-    res.json({ success: true, data: user });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-router.delete("/api/users/:id", authenticate, async (req, res) => {
-  try {
-    await UserService.deleteUser(req.params.id);
-    res.json({ success: true, message: "User deleted" });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-module.exports = router;
-""",
-    },
-    # ── Express: Auth middleware ──
-    {
-        "filename": "authMiddleware.js",
-        "code": """\
-const jwt = require("jsonwebtoken");
-const { getRedisClient } = require("../config/redis");
-
-const JWT_SECRET = process.env.JWT_SECRET || "dev-secret";
-const TOKEN_EXPIRY = "24h";
-
-async function authenticate(req, res, next) {
-  const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    return res.status(401).json({ error: "Missing authorization header" });
-  }
-
-  const token = authHeader.split(" ")[1];
-
-  try {
-    const redis = getRedisClient();
-    const isBlacklisted = await redis.get(`blacklist:${token}`);
-    if (isBlacklisted) {
-      return res.status(401).json({ error: "Token has been revoked" });
-    }
-
-    const decoded = jwt.verify(token, JWT_SECRET);
-    req.user = {
-      id: decoded.sub,
-      email: decoded.email,
-      role: decoded.role,
-      orgId: decoded.orgId,
-    };
-    next();
-  } catch (err) {
-    if (err.name === "TokenExpiredError") {
-      return res.status(401).json({ error: "Token expired" });
-    }
-    return res.status(401).json({ error: "Invalid token" });
-  }
-}
-
-function authorize(...roles) {
-  return (req, res, next) => {
-    if (!req.user || !roles.includes(req.user.role)) {
-      return res.status(403).json({ error: "Insufficient permissions" });
-    }
-    next();
-  };
-}
-
-function generateToken(user) {
-  return jwt.sign(
-    { sub: user.id, email: user.email, role: user.role, orgId: user.orgId },
-    JWT_SECRET,
-    { expiresIn: TOKEN_EXPIRY }
-  );
-}
-
-module.exports = { authenticate, authorize, generateToken };
-""",
-    },
-    # ── FastAPI: Orders endpoint ──
-    {
-        "filename": "orders.py",
-        "code": """\
-from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy.orm import Session
-from typing import Optional
-from datetime import datetime, timedelta
-
-from app.database import get_db
-from app.models.order import Order, OrderItem
-from app.schemas.order import OrderCreate, OrderResponse, OrderListResponse
-from app.services.auth import get_current_user
-from app.services.inventory import check_stock, reserve_items
-
-router = APIRouter(prefix="/api/orders", tags=["orders"])
-
-
-@router.get("/", response_model=OrderListResponse)
-async def list_orders(
-    status: Optional[str] = None,
-    page: int = Query(1, ge=1),
-    limit: int = Query(20, ge=1, le=100),
-    db: Session = Depends(get_db),
-    user=Depends(get_current_user),
-):
-    query = db.query(Order).filter(Order.org_id == user.org_id)
-
-    if status:
-        query = query.filter(Order.status == status)
-
-    total = query.count()
-    orders = query.offset((page - 1) * limit).limit(limit).all()
-
-    return {"total": total, "page": page, "orders": orders}
-
-
-@router.post("/", response_model=OrderResponse, status_code=201)
-async def create_order(
-    payload: OrderCreate,
-    db: Session = Depends(get_db),
-    user=Depends(get_current_user),
-):
-    for item in payload.items:
-        available = await check_stock(item.product_id, item.quantity)
-        if not available:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Insufficient stock for product {item.product_id}",
-            )
-
-    order = Order(
-        customer_id=payload.customer_id,
-        org_id=user.org_id,
-        status="pending",
-        total=sum(i.price * i.quantity for i in payload.items),
-        created_by=user.id,
-    )
-    db.add(order)
-    db.flush()
-
-    for item in payload.items:
-        db_item = OrderItem(
-            order_id=order.id,
-            product_id=item.product_id,
-            quantity=item.quantity,
-            price=item.price,
-        )
-        db.add(db_item)
-
-    await reserve_items(order.id, payload.items)
-    db.commit()
-    db.refresh(order)
-
-    return order
-
-
-@router.get("/{order_id}", response_model=OrderResponse)
-async def get_order(
-    order_id: int,
-    db: Session = Depends(get_db),
-    user=Depends(get_current_user),
-):
-    order = db.query(Order).filter(
-        Order.id == order_id,
-        Order.org_id == user.org_id,
-    ).first()
-
-    if not order:
-        raise HTTPException(status_code=404, detail="Order not found")
-
-    return order
-
-
-@router.patch("/{order_id}/status")
-async def update_order_status(
-    order_id: int,
-    status: str,
-    db: Session = Depends(get_db),
-    user=Depends(get_current_user),
-):
-    valid_transitions = {
-        "pending": ["confirmed", "cancelled"],
-        "confirmed": ["shipped", "cancelled"],
-        "shipped": ["delivered"],
-    }
-
-    order = db.query(Order).filter(Order.id == order_id).first()
-    if not order:
-        raise HTTPException(status_code=404, detail="Order not found")
-
-    allowed = valid_transitions.get(order.status, [])
-    if status not in allowed:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Cannot transition from {order.status} to {status}",
-        )
-
-    order.status = status
-    order.updated_at = datetime.utcnow()
-    db.commit()
-
-    return {"success": True, "order_id": order.id, "status": order.status}
-""",
-    },
-    # ── React: Dashboard page with data fetching ──
-    {
-        "filename": "DashboardPage.tsx",
-        "code": """\
-import { useState, useEffect } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { api } from "@/lib/api";
-import { StatsCard } from "@/components/StatsCard";
-import { OrdersTable } from "@/components/OrdersTable";
-import { RevenueChart } from "@/components/RevenueChart";
-import { DateRangePicker } from "@/components/ui/DateRangePicker";
-
-interface DashboardStats {
-  totalRevenue: number;
-  orderCount: number;
-  avgOrderValue: number;
-  activeCustomers: number;
-}
-
-export default function DashboardPage() {
-  const [dateRange, setDateRange] = useState({
-    from: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
-    to: new Date(),
-  });
-
-  const { data: stats, isLoading: statsLoading } = useQuery({
-    queryKey: ["dashboard-stats", dateRange],
-    queryFn: () =>
-      api.get<DashboardStats>("/api/analytics/stats", {
-        params: {
-          from: dateRange.from.toISOString(),
-          to: dateRange.to.toISOString(),
-        },
-      }),
-  });
-
-  const { data: recentOrders, isLoading: ordersLoading } = useQuery({
-    queryKey: ["recent-orders"],
-    queryFn: () => api.get("/api/orders?limit=10&sort=-createdAt"),
-  });
-
-  return (
-    <div className="p-6 space-y-6">
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-semibold text-gray-900">Dashboard</h1>
-        <DateRangePicker value={dateRange} onChange={setDateRange} />
-      </div>
-
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatsCard
-          title="Total Revenue"
-          value={stats?.totalRevenue}
-          format="currency"
-          loading={statsLoading}
-        />
-        <StatsCard
-          title="Orders"
-          value={stats?.orderCount}
-          loading={statsLoading}
-        />
-        <StatsCard
-          title="Avg Order Value"
-          value={stats?.avgOrderValue}
-          format="currency"
-          loading={statsLoading}
-        />
-        <StatsCard
-          title="Active Customers"
-          value={stats?.activeCustomers}
-          loading={statsLoading}
-        />
-      </div>
-
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <div className="lg:col-span-2">
-          <RevenueChart dateRange={dateRange} />
-        </div>
-        <div>
-          <h2 className="text-lg font-medium mb-4">Recent Orders</h2>
-          <OrdersTable
-            orders={recentOrders?.data || []}
-            loading={ordersLoading}
-            compact
-          />
-        </div>
-      </div>
-    </div>
-  );
-}
-""",
-    },
-    # ── React: Form with validation + API call ──
-    {
-        "filename": "CreateProductForm.tsx",
-        "code": """\
-import { useState } from "react";
-import { useForm } from "react-hook-form";
-import { zodResolver } from "@hookform/resolvers/zod";
-import { z } from "zod";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { api } from "@/lib/api";
-import { toast } from "sonner";
-
-const productSchema = z.object({
-  name: z.string().min(2, "Name must be at least 2 characters"),
-  sku: z.string().regex(/^[A-Z0-9-]+$/, "SKU must be uppercase alphanumeric"),
-  price: z.number().min(0.01, "Price must be positive"),
-  category: z.string().min(1, "Category is required"),
-  description: z.string().max(500).optional(),
-  stock: z.number().int().min(0).default(0),
-});
-
-type ProductFormData = z.infer<typeof productSchema>;
-
-interface Props {
-  onSuccess?: () => void;
-  onCancel?: () => void;
-}
-
-export function CreateProductForm({ onSuccess, onCancel }: Props) {
-  const queryClient = useQueryClient();
-
-  const {
-    register,
-    handleSubmit,
-    formState: { errors },
-    reset,
-  } = useForm<ProductFormData>({
-    resolver: zodResolver(productSchema),
-    defaultValues: { stock: 0 },
-  });
-
-  const mutation = useMutation({
-    mutationFn: (data: ProductFormData) => api.post("/api/products", data),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["products"] });
-      toast.success("Product created successfully");
-      reset();
-      onSuccess?.();
-    },
-    onError: (err: any) => {
-      toast.error(err.response?.data?.error || "Failed to create product");
-    },
-  });
-
-  return (
-    <form onSubmit={handleSubmit((data) => mutation.mutate(data))} className="space-y-4">
-      <div>
-        <label className="block text-sm font-medium text-gray-700">Name</label>
-        <input
-          {...register("name")}
-          className="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
-        />
-        {errors.name && <p className="mt-1 text-sm text-red-600">{errors.name.message}</p>}
-      </div>
-
-      <div className="grid grid-cols-2 gap-4">
-        <div>
-          <label className="block text-sm font-medium text-gray-700">SKU</label>
-          <input
-            {...register("sku")}
-            placeholder="PROD-001"
-            className="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
-          />
-          {errors.sku && <p className="mt-1 text-sm text-red-600">{errors.sku.message}</p>}
-        </div>
-        <div>
-          <label className="block text-sm font-medium text-gray-700">Price</label>
-          <input
-            type="number"
-            step="0.01"
-            {...register("price", { valueAsNumber: true })}
-            className="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
-          />
-          {errors.price && <p className="mt-1 text-sm text-red-600">{errors.price.message}</p>}
-        </div>
-      </div>
-
-      <div>
-        <label className="block text-sm font-medium text-gray-700">Category</label>
-        <select
-          {...register("category")}
-          className="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2"
-        >
-          <option value="">Select category</option>
-          <option value="electronics">Electronics</option>
-          <option value="clothing">Clothing</option>
-          <option value="food">Food & Beverage</option>
-          <option value="other">Other</option>
-        </select>
-        {errors.category && <p className="mt-1 text-sm text-red-600">{errors.category.message}</p>}
-      </div>
-
-      <div className="flex justify-end gap-3 pt-4">
-        <button type="button" onClick={onCancel} className="px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 rounded-lg">
-          Cancel
-        </button>
-        <button type="submit" disabled={mutation.isPending} className="px-4 py-2 text-sm text-white bg-blue-600 hover:bg-blue-700 rounded-lg disabled:opacity-50">
-          {mutation.isPending ? "Creating..." : "Create Product"}
-        </button>
-      </div>
-    </form>
-  );
-}
-""",
-    },
-    # ── FastAPI: User service with DB ──
-    {
-        "filename": "userService.py",
-        "code": """\
-from sqlalchemy.orm import Session
-from sqlalchemy import or_
-from passlib.context import CryptContext
-from datetime import datetime
-from typing import Optional
-
-from app.models.user import User
-from app.schemas.user import UserCreate, UserUpdate
-
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
-
-class UserService:
-    def __init__(self, db: Session):
-        self.db = db
-
-    def get_users(self, org_id: int, page: int = 1, limit: int = 20, search: Optional[str] = None):
-        query = self.db.query(User).filter(User.org_id == org_id, User.is_active == True)
-
-        if search:
-            query = query.filter(
-                or_(
-                    User.name.ilike(f"%{search}%"),
-                    User.email.ilike(f"%{search}%"),
-                )
-            )
-
-        total = query.count()
-        users = query.offset((page - 1) * limit).limit(limit).all()
-
-        return {"total": total, "page": page, "users": users}
-
-    def get_by_id(self, user_id: int):
-        return self.db.query(User).filter(User.id == user_id).first()
-
-    def get_by_email(self, email: str):
-        return self.db.query(User).filter(User.email == email).first()
-
-    def create_user(self, data: UserCreate, org_id: int):
-        existing = self.get_by_email(data.email)
-        if existing:
-            raise ValueError("Email already registered")
-
-        user = User(
-            email=data.email,
-            name=data.name,
-            role=data.role or "member",
-            org_id=org_id,
-            password_hash=pwd_context.hash(data.password),
-        )
-        self.db.add(user)
-        self.db.commit()
-        self.db.refresh(user)
-        return user
-
-    def update_user(self, user_id: int, data: UserUpdate):
-        user = self.get_by_id(user_id)
-        if not user:
-            raise ValueError("User not found")
-
-        update_data = data.dict(exclude_unset=True)
-        if "password" in update_data:
-            update_data["password_hash"] = pwd_context.hash(update_data.pop("password"))
-
-        for field, value in update_data.items():
-            setattr(user, field, value)
-
-        user.updated_at = datetime.utcnow()
-        self.db.commit()
-        self.db.refresh(user)
-        return user
-
-    def deactivate_user(self, user_id: int):
-        user = self.get_by_id(user_id)
-        if not user:
-            raise ValueError("User not found")
-
-        user.is_active = False
-        user.deactivated_at = datetime.utcnow()
-        self.db.commit()
-        return True
-
-    def verify_password(self, plain: str, hashed: str) -> bool:
-        return pwd_context.verify(plain, hashed)
-""",
-    },
-    # ── Next.js: API route handler ──
-    {
-        "filename": "apiProducts.ts",
-        "code": """\
-import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
-import { getServerSession } from "@/lib/auth";
-import { z } from "zod";
-
-const querySchema = z.object({
-  page: z.coerce.number().int().min(1).default(1),
-  limit: z.coerce.number().int().min(1).max(100).default(20),
-  category: z.string().optional(),
-  search: z.string().optional(),
-  sort: z.enum(["name", "price", "createdAt", "-name", "-price", "-createdAt"]).default("-createdAt"),
-});
-
-export async function GET(req: NextRequest) {
-  const session = await getServerSession();
-  if (!session) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
-  const params = Object.fromEntries(req.nextUrl.searchParams);
-  const query = querySchema.parse(params);
-
-  const where: any = { orgId: session.user.orgId };
-  if (query.category) where.category = query.category;
-  if (query.search) {
-    where.OR = [
-      { name: { contains: query.search, mode: "insensitive" } },
-      { sku: { contains: query.search, mode: "insensitive" } },
-    ];
-  }
-
-  const sortField = query.sort.startsWith("-") ? query.sort.slice(1) : query.sort;
-  const sortDir = query.sort.startsWith("-") ? "desc" : "asc";
-
-  const [products, total] = await Promise.all([
-    prisma.product.findMany({
-      where,
-      orderBy: { [sortField]: sortDir },
-      skip: (query.page - 1) * query.limit,
-      take: query.limit,
-      include: { category: true },
-    }),
-    prisma.product.count({ where }),
-  ]);
-
-  return NextResponse.json({
-    data: products,
-    pagination: {
-      page: query.page,
-      limit: query.limit,
-      total,
-      pages: Math.ceil(total / query.limit),
-    },
-  });
-}
-
-const createSchema = z.object({
-  name: z.string().min(1),
-  sku: z.string().min(1),
-  price: z.number().positive(),
-  categoryId: z.string().uuid(),
-  description: z.string().optional(),
-  stock: z.number().int().min(0).default(0),
-});
-
-export async function POST(req: NextRequest) {
-  const session = await getServerSession();
-  if (!session) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
-  const body = await req.json();
-  const data = createSchema.parse(body);
-
-  const existing = await prisma.product.findFirst({
-    where: { sku: data.sku, orgId: session.user.orgId },
-  });
-  if (existing) {
-    return NextResponse.json({ error: "SKU already exists" }, { status: 409 });
-  }
-
-  const product = await prisma.product.create({
-    data: { ...data, orgId: session.user.orgId },
-  });
-
-  return NextResponse.json({ data: product }, { status: 201 });
-}
-""",
-    },
-    # ── React: Data table with sorting/filtering ──
-    {
-        "filename": "ProductsTable.tsx",
-        "code": """\
-import { useState, useMemo } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { api } from "@/lib/api";
-import { Input } from "@/components/ui/Input";
-import { Badge } from "@/components/ui/Badge";
-import { formatCurrency } from "@/lib/utils";
-
-interface Product {
-  id: string;
-  name: string;
-  sku: string;
-  price: number;
-  stock: number;
-  category: { name: string };
-  createdAt: string;
-}
-
-interface Props {
-  onSelect?: (product: Product) => void;
-}
-
-export function ProductsTable({ onSelect }: Props) {
-  const [search, setSearch] = useState("");
-  const [page, setPage] = useState(1);
-  const [sortBy, setSortBy] = useState("-createdAt");
-
-  const { data, isLoading } = useQuery({
-    queryKey: ["products", { search, page, sortBy }],
-    queryFn: () =>
-      api.get("/api/products", {
-        params: { search, page, limit: 20, sort: sortBy },
-      }),
-    keepPreviousData: true,
-  });
-
-  const products = data?.data || [];
-  const pagination = data?.pagination;
-
-  const handleSort = (field: string) => {
-    setSortBy((prev) =>
-      prev === field ? `-${field}` : prev === `-${field}` ? field : field
-    );
-  };
-
-  const stockBadge = (stock: number) => {
-    if (stock === 0) return <Badge variant="destructive">Out of stock</Badge>;
-    if (stock < 10) return <Badge variant="warning">Low stock</Badge>;
-    return <Badge variant="success">In stock</Badge>;
-  };
-
-  return (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <Input
-          placeholder="Search products..."
-          value={search}
-          onChange={(e) => {
-            setSearch(e.target.value);
-            setPage(1);
-          }}
-          className="max-w-sm"
-        />
-        <span className="text-sm text-gray-500">
-          {pagination?.total || 0} products
-        </span>
-      </div>
-
-      <div className="border rounded-lg overflow-hidden">
-        <table className="min-w-full divide-y divide-gray-200">
-          <thead className="bg-gray-50">
-            <tr>
-              {["name", "sku", "price", "stock"].map((col) => (
-                <th
-                  key={col}
-                  onClick={() => handleSort(col)}
-                  className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase cursor-pointer hover:bg-gray-100"
-                >
-                  {col}
-                  {sortBy === col && " ↑"}
-                  {sortBy === `-${col}` && " ↓"}
-                </th>
-              ))}
-              <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                Category
-              </th>
-            </tr>
-          </thead>
-          <tbody className="bg-white divide-y divide-gray-200">
-            {products.map((p: Product) => (
-              <tr
-                key={p.id}
-                onClick={() => onSelect?.(p)}
-                className="hover:bg-gray-50 cursor-pointer"
-              >
-                <td className="px-4 py-3 text-sm font-medium">{p.name}</td>
-                <td className="px-4 py-3 text-sm text-gray-500">{p.sku}</td>
-                <td className="px-4 py-3 text-sm">{formatCurrency(p.price)}</td>
-                <td className="px-4 py-3 text-sm">{stockBadge(p.stock)}</td>
-                <td className="px-4 py-3 text-sm text-gray-500">{p.category.name}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-
-      {pagination && pagination.pages > 1 && (
-        <div className="flex justify-center gap-2">
-          <button
-            onClick={() => setPage((p) => Math.max(1, p - 1))}
-            disabled={page === 1}
-            className="px-3 py-1 text-sm border rounded disabled:opacity-50"
-          >
-            Previous
-          </button>
-          <span className="px-3 py-1 text-sm">
-            Page {page} of {pagination.pages}
-          </span>
-          <button
-            onClick={() => setPage((p) => Math.min(pagination.pages, p + 1))}
-            disabled={page === pagination.pages}
-            className="px-3 py-1 text-sm border rounded disabled:opacity-50"
-          >
-            Next
-          </button>
-        </div>
-      )}
-    </div>
-  );
-}
-""",
-    },
-    # ── Go: HTTP handler ──
-    {
-        "filename": "handlers.go",
-        "code": """\
-package handlers
-
-import (
-	"encoding/json"
-	"log"
-	"net/http"
-	"strconv"
-
-	"github.com/gorilla/mux"
-	"myapp/internal/models"
-	"myapp/internal/services"
-)
-
-type OrderHandler struct {
-	service *services.OrderService
-}
-
-func NewOrderHandler(svc *services.OrderService) *OrderHandler {
-	return &OrderHandler{service: svc}
-}
-
-func (h *OrderHandler) ListOrders(w http.ResponseWriter, r *http.Request) {
-	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
-	if page < 1 {
-		page = 1
-	}
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	if limit < 1 || limit > 100 {
-		limit = 20
-	}
-	status := r.URL.Query().Get("status")
-
-	orders, total, err := h.service.ListOrders(r.Context(), page, limit, status)
-	if err != nil {
-		log.Printf("ListOrders error: %v", err)
-		writeError(w, http.StatusInternalServerError, "Failed to fetch orders")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"data":  orders,
-		"total": total,
-		"page":  page,
-	})
-}
-
-func (h *OrderHandler) GetOrder(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.ParseInt(mux.Vars(r)["id"], 10, 64)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "Invalid order ID")
-		return
-	}
-
-	order, err := h.service.GetByID(r.Context(), id)
-	if err != nil {
-		writeError(w, http.StatusNotFound, "Order not found")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, order)
-}
-
-func (h *OrderHandler) CreateOrder(w http.ResponseWriter, r *http.Request) {
-	var req models.CreateOrderRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "Invalid request body")
-		return
-	}
-
-	if len(req.Items) == 0 {
-		writeError(w, http.StatusBadRequest, "Order must have at least one item")
-		return
-	}
-
-	order, err := h.service.CreateOrder(r.Context(), &req)
-	if err != nil {
-		log.Printf("CreateOrder error: %v", err)
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	writeJSON(w, http.StatusCreated, order)
-}
-
-func writeJSON(w http.ResponseWriter, status int, data interface{}) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(data)
-}
-
-func writeError(w http.ResponseWriter, status int, msg string) {
-	writeJSON(w, status, map[string]string{"error": msg})
-}
-""",
-    },
-    # ── Django: Model + Manager ──
+    # ── Django: Product model with custom manager ──
     {
         "filename": "models.py",
         "code": """\
 from django.db import models
+from django.conf import settings
 from django.utils import timezone
+from django.core.validators import MinValueValidator
+from decimal import Decimal
 
 
-class ActiveManager(models.Manager):
+class PublishedManager(models.Manager):
     def get_queryset(self):
-        return super().get_queryset().filter(is_active=True)
+        return super().get_queryset().filter(
+            is_published=True,
+            published_at__lte=timezone.now(),
+        )
 
 
-class Customer(models.Model):
-    name = models.CharField(max_length=255)
-    email = models.EmailField(unique=True)
-    phone = models.CharField(max_length=20, blank=True)
-    company = models.CharField(max_length=255, blank=True)
-    org = models.ForeignKey("Organization", on_delete=models.CASCADE, related_name="customers")
-    is_active = models.BooleanField(default=True)
-    notes = models.TextField(blank=True)
+class Category(models.Model):
+    name = models.CharField(max_length=120)
+    slug = models.SlugField(unique=True)
+    parent = models.ForeignKey(
+        "self", null=True, blank=True,
+        on_delete=models.SET_NULL,
+        related_name="children",
+    )
+    sort_order = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name_plural = "categories"
+        ordering = ["sort_order", "name"]
+
+    def __str__(self):
+        return self.name
+
+    @property
+    def full_path(self):
+        parts = [self.name]
+        current = self.parent
+        while current:
+            parts.insert(0, current.name)
+            current = current.parent
+        return " > ".join(parts)
+
+
+class Product(models.Model):
+    STATUS_CHOICES = [
+        ("draft", "Draft"),
+        ("review", "In Review"),
+        ("published", "Published"),
+        ("archived", "Archived"),
+    ]
+
+    title = models.CharField(max_length=255)
+    slug = models.SlugField(unique=True)
+    description = models.TextField(blank=True)
+    price = models.DecimalField(
+        max_digits=10, decimal_places=2,
+        validators=[MinValueValidator(Decimal("0.01"))],
+    )
+    compare_at_price = models.DecimalField(
+        max_digits=10, decimal_places=2,
+        null=True, blank=True,
+    )
+    sku = models.CharField(max_length=50, unique=True)
+    stock_quantity = models.PositiveIntegerField(default=0)
+    category = models.ForeignKey(
+        Category, on_delete=models.PROTECT,
+        related_name="products",
+    )
+    tags = models.ManyToManyField("Tag", blank=True, related_name="products")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="draft")
+    is_published = models.BooleanField(default=False)
+    published_at = models.DateTimeField(null=True, blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL, null=True,
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     objects = models.Manager()
-    active = ActiveManager()
+    published = PublishedManager()
 
     class Meta:
         ordering = ["-created_at"]
         indexes = [
-            models.Index(fields=["email"]),
-            models.Index(fields=["org", "is_active"]),
+            models.Index(fields=["slug"]),
+            models.Index(fields=["sku"]),
+            models.Index(fields=["status", "is_published"]),
+            models.Index(fields=["category", "-created_at"]),
         ]
 
     def __str__(self):
-        return f"{self.name} ({self.email})"
+        return self.title
 
     @property
-    def order_count(self):
-        return self.orders.count()
+    def is_on_sale(self):
+        return (
+            self.compare_at_price is not None
+            and self.compare_at_price > self.price
+        )
 
     @property
-    def total_spent(self):
-        return self.orders.filter(
-            status="completed"
-        ).aggregate(
-            total=models.Sum("total")
-        )["total"] or 0
+    def discount_percentage(self):
+        if not self.is_on_sale:
+            return 0
+        diff = self.compare_at_price - self.price
+        return int((diff / self.compare_at_price) * 100)
+
+    @property
+    def in_stock(self):
+        return self.stock_quantity > 0
+
+    def publish(self):
+        self.status = "published"
+        self.is_published = True
+        self.published_at = timezone.now()
+        self.save(update_fields=["status", "is_published", "published_at", "updated_at"])
 
 
-class CustomerNote(models.Model):
-    customer = models.ForeignKey(Customer, on_delete=models.CASCADE, related_name="customer_notes")
-    content = models.TextField()
-    created_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        ordering = ["-created_at"]
+class Tag(models.Model):
+    name = models.CharField(max_length=60, unique=True)
+    slug = models.SlugField(unique=True)
 
     def __str__(self):
-        return f"Note for {self.customer.name} at {self.created_at}"
+        return self.name
 """,
     },
-    # ── Vue: Composable + Component ──
+    # ── Django: Serializers ──
     {
-        "filename": "useOrders.ts",
+        "filename": "serializers.py",
         "code": """\
-import { ref, computed, watch } from "vue";
-import { useRoute, useRouter } from "vue-router";
-import { api } from "@/lib/api";
-import { useToast } from "@/composables/useToast";
+from rest_framework import serializers
+from django.utils.text import slugify
 
-interface Order {
-  id: number;
-  customerName: string;
-  status: string;
-  total: number;
-  itemCount: number;
-  createdAt: string;
-}
+from products.models import Product, Category, Tag
 
-interface OrderFilters {
-  status?: string;
-  search?: string;
-  page: number;
-  limit: number;
-}
 
-export function useOrders() {
-  const route = useRoute();
-  const router = useRouter();
-  const toast = useToast();
+class TagSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Tag
+        fields = ["id", "name", "slug"]
+        read_only_fields = ["slug"]
 
-  const orders = ref<Order[]>([]);
-  const total = ref(0);
-  const loading = ref(false);
-  const error = ref<string | null>(null);
 
-  const filters = ref<OrderFilters>({
-    status: (route.query.status as string) || undefined,
-    search: (route.query.search as string) || undefined,
-    page: parseInt(route.query.page as string) || 1,
-    limit: 20,
-  });
+class CategorySerializer(serializers.ModelSerializer):
+    full_path = serializers.ReadOnlyField()
+    product_count = serializers.SerializerMethodField()
 
-  const totalPages = computed(() => Math.ceil(total.value / filters.value.limit));
+    class Meta:
+        model = Category
+        fields = ["id", "name", "slug", "parent", "sort_order", "full_path", "product_count"]
 
-  async function fetchOrders() {
-    loading.value = true;
-    error.value = null;
+    def get_product_count(self, obj):
+        return obj.products.filter(is_published=True).count()
 
-    try {
-      const params = new URLSearchParams();
-      params.set("page", String(filters.value.page));
-      params.set("limit", String(filters.value.limit));
-      if (filters.value.status) params.set("status", filters.value.status);
-      if (filters.value.search) params.set("search", filters.value.search);
 
-      const res = await api.get(`/api/orders?${params}`);
-      orders.value = res.data.orders;
-      total.value = res.data.total;
-    } catch (err: any) {
-      error.value = err.response?.data?.error || "Failed to load orders";
-      toast.error(error.value);
-    } finally {
-      loading.value = false;
-    }
-  }
+class ProductListSerializer(serializers.ModelSerializer):
+    category_name = serializers.CharField(source="category.name", read_only=True)
+    is_on_sale = serializers.ReadOnlyField()
+    discount_percentage = serializers.ReadOnlyField()
+    in_stock = serializers.ReadOnlyField()
 
-  async function updateStatus(orderId: number, status: string) {
-    try {
-      await api.patch(`/api/orders/${orderId}/status`, { status });
-      toast.success("Order status updated");
-      await fetchOrders();
-    } catch (err: any) {
-      toast.error(err.response?.data?.error || "Failed to update status");
-    }
-  }
+    class Meta:
+        model = Product
+        fields = [
+            "id", "title", "slug", "price", "compare_at_price",
+            "sku", "stock_quantity", "category", "category_name",
+            "status", "is_published", "is_on_sale",
+            "discount_percentage", "in_stock", "created_at",
+        ]
 
-  function setPage(page: number) {
-    filters.value.page = page;
-    router.push({ query: { ...route.query, page: String(page) } });
-  }
 
-  function setSearch(search: string) {
-    filters.value.search = search || undefined;
-    filters.value.page = 1;
-  }
+class ProductDetailSerializer(serializers.ModelSerializer):
+    category = CategorySerializer(read_only=True)
+    category_id = serializers.PrimaryKeyRelatedField(
+        queryset=Category.objects.all(),
+        source="category",
+        write_only=True,
+    )
+    tags = TagSerializer(many=True, read_only=True)
+    tag_ids = serializers.PrimaryKeyRelatedField(
+        queryset=Tag.objects.all(),
+        source="tags",
+        many=True,
+        write_only=True,
+        required=False,
+    )
+    is_on_sale = serializers.ReadOnlyField()
+    discount_percentage = serializers.ReadOnlyField()
+    in_stock = serializers.ReadOnlyField()
+    created_by_name = serializers.CharField(
+        source="created_by.get_full_name", read_only=True
+    )
 
-  watch(filters, fetchOrders, { deep: true, immediate: true });
+    class Meta:
+        model = Product
+        fields = [
+            "id", "title", "slug", "description", "price",
+            "compare_at_price", "sku", "stock_quantity",
+            "category", "category_id", "tags", "tag_ids",
+            "status", "is_published", "published_at",
+            "is_on_sale", "discount_percentage", "in_stock",
+            "created_by", "created_by_name",
+            "created_at", "updated_at",
+        ]
+        read_only_fields = ["created_by", "published_at"]
 
-  return {
-    orders,
-    total,
-    totalPages,
-    loading,
-    error,
-    filters,
-    fetchOrders,
-    updateStatus,
-    setPage,
-    setSearch,
-  };
-}
+    def validate_sku(self, value):
+        qs = Product.objects.filter(sku=value)
+        if self.instance:
+            qs = qs.exclude(pk=self.instance.pk)
+        if qs.exists():
+            raise serializers.ValidationError("A product with this SKU already exists.")
+        return value
+
+    def validate(self, data):
+        price = data.get("price", getattr(self.instance, "price", None))
+        compare = data.get("compare_at_price", getattr(self.instance, "compare_at_price", None))
+        if compare is not None and compare <= price:
+            raise serializers.ValidationError({
+                "compare_at_price": "Compare-at price must be greater than the selling price."
+            })
+        return data
+
+    def create(self, validated_data):
+        tags = validated_data.pop("tags", [])
+        validated_data["created_by"] = self.context["request"].user
+        if not validated_data.get("slug"):
+            validated_data["slug"] = slugify(validated_data["title"])
+        product = Product.objects.create(**validated_data)
+        if tags:
+            product.tags.set(tags)
+        return product
+
+    def update(self, instance, validated_data):
+        tags = validated_data.pop("tags", None)
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.save()
+        if tags is not None:
+            instance.tags.set(tags)
+        return instance
 """,
     },
-    # ── Express: Database migration ──
+    # ── Django: ViewSet with filters ──
     {
-        "filename": "migrationAddInvoices.js",
+        "filename": "views.py",
         "code": """\
-exports.up = function (knex) {
-  return knex.schema
-    .createTable("invoices", (table) => {
-      table.increments("id").primary();
-      table.integer("order_id").unsigned().references("id").inTable("orders").onDelete("CASCADE");
-      table.integer("customer_id").unsigned().references("id").inTable("customers");
-      table.string("invoice_number").unique().notNullable();
-      table.decimal("subtotal", 10, 2).notNullable();
-      table.decimal("tax", 10, 2).defaultTo(0);
-      table.decimal("total", 10, 2).notNullable();
-      table.enum("status", ["draft", "sent", "paid", "overdue", "cancelled"]).defaultTo("draft");
-      table.date("due_date");
-      table.date("paid_date");
-      table.text("notes");
-      table.integer("created_by").unsigned().references("id").inTable("users");
-      table.timestamps(true, true);
-    })
-    .createTable("invoice_items", (table) => {
-      table.increments("id").primary();
-      table.integer("invoice_id").unsigned().references("id").inTable("invoices").onDelete("CASCADE");
-      table.string("description").notNullable();
-      table.integer("quantity").notNullable();
-      table.decimal("unit_price", 10, 2).notNullable();
-      table.decimal("total", 10, 2).notNullable();
-    })
-    .then(() => {
-      return knex.schema.alterTable("orders", (table) => {
-        table.integer("invoice_id").unsigned().references("id").inTable("invoices");
-      });
-    });
-};
+from rest_framework import viewsets, filters, status
+from rest_framework.decorators import action
+from rest_framework.response import Response
+from rest_framework.permissions import IsAuthenticated, IsAdminUser
+from django_filters.rest_framework import DjangoFilterBackend
+from django.db.models import Q, Count, Avg
 
-exports.down = function (knex) {
-  return knex.schema
-    .alterTable("orders", (table) => {
-      table.dropColumn("invoice_id");
-    })
-    .dropTableIfExists("invoice_items")
-    .dropTableIfExists("invoices");
-};
+from products.models import Product, Category
+from products.serializers import (
+    ProductListSerializer,
+    ProductDetailSerializer,
+    CategorySerializer,
+)
+from products.filters import ProductFilter
+from products.pagination import StandardPagination
+
+
+class ProductViewSet(viewsets.ModelViewSet):
+    permission_classes = [IsAuthenticated]
+    pagination_class = StandardPagination
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filterset_class = ProductFilter
+    search_fields = ["title", "sku", "description"]
+    ordering_fields = ["price", "created_at", "stock_quantity", "title"]
+    ordering = ["-created_at"]
+
+    def get_queryset(self):
+        qs = Product.objects.select_related("category", "created_by").prefetch_related("tags")
+        if not self.request.user.is_staff:
+            qs = qs.filter(is_published=True)
+        return qs
+
+    def get_serializer_class(self):
+        if self.action == "list":
+            return ProductListSerializer
+        return ProductDetailSerializer
+
+    @action(detail=True, methods=["post"], permission_classes=[IsAdminUser])
+    def publish(self, request, pk=None):
+        product = self.get_object()
+        if product.status == "published":
+            return Response(
+                {"detail": "Product is already published."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        product.publish()
+        serializer = self.get_serializer(product)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=["post"], permission_classes=[IsAdminUser])
+    def archive(self, request, pk=None):
+        product = self.get_object()
+        product.status = "archived"
+        product.is_published = False
+        product.save(update_fields=["status", "is_published", "updated_at"])
+        return Response({"detail": "Product archived."})
+
+    @action(detail=False, methods=["get"])
+    def stats(self, request):
+        qs = self.get_queryset()
+        data = {
+            "total": qs.count(),
+            "published": qs.filter(is_published=True).count(),
+            "draft": qs.filter(status="draft").count(),
+            "out_of_stock": qs.filter(stock_quantity=0).count(),
+            "avg_price": qs.aggregate(avg=Avg("price"))["avg"],
+            "by_category": list(
+                qs.values("category__name")
+                .annotate(count=Count("id"))
+                .order_by("-count")[:10]
+            ),
+        }
+        return Response(data)
+
+    @action(detail=True, methods=["post"])
+    def adjust_stock(self, request, pk=None):
+        product = self.get_object()
+        delta = request.data.get("delta", 0)
+        try:
+            delta = int(delta)
+        except (TypeError, ValueError):
+            return Response(
+                {"detail": "delta must be an integer."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        new_qty = product.stock_quantity + delta
+        if new_qty < 0:
+            return Response(
+                {"detail": "Stock cannot go below zero."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        product.stock_quantity = new_qty
+        product.save(update_fields=["stock_quantity", "updated_at"])
+        return Response({"stock_quantity": product.stock_quantity})
+
+
+class CategoryViewSet(viewsets.ModelViewSet):
+    queryset = Category.objects.annotate(
+        product_count=Count("products", filter=Q(products__is_published=True))
+    ).select_related("parent")
+    serializer_class = CategorySerializer
+    permission_classes = [IsAuthenticated]
+    filter_backends = [filters.SearchFilter]
+    search_fields = ["name"]
 """,
     },
-    # ── React: Custom hook for auth ──
+    # ── Django: URL configuration ──
     {
-        "filename": "useAuth.ts",
+        "filename": "urls.py",
         "code": """\
-import { createContext, useContext, useState, useEffect, useCallback } from "react";
-import { useRouter } from "next/navigation";
-import { api } from "@/lib/api";
+from django.urls import path, include
+from rest_framework.routers import DefaultRouter
 
-interface User {
-  id: string;
-  email: string;
-  name: string;
-  role: string;
-  orgId: string;
-  avatarUrl?: string;
-}
+from products.views import ProductViewSet, CategoryViewSet
 
-interface AuthState {
-  user: User | null;
-  loading: boolean;
-  isAuthenticated: boolean;
-}
+router = DefaultRouter()
+router.register(r"products", ProductViewSet, basename="product")
+router.register(r"categories", CategoryViewSet, basename="category")
 
-interface AuthContextType extends AuthState {
-  login: (email: string, password: string) => Promise<void>;
-  logout: () => Promise<void>;
-  refreshUser: () => Promise<void>;
-}
+app_name = "products"
 
-const AuthContext = createContext<AuthContextType | null>(null);
+urlpatterns = [
+    path("api/v1/", include(router.urls)),
+]
+""",
+    },
+    # ── Django: FilterSet ──
+    {
+        "filename": "filters.py",
+        "code": """\
+import django_filters
+from django.db.models import Q
 
-export function useAuth() {
-  const ctx = useContext(AuthContext);
-  if (!ctx) throw new Error("useAuth must be used within AuthProvider");
-  return ctx;
-}
+from products.models import Product
 
-export function useAuthProvider(): AuthContextType {
-  const router = useRouter();
-  const [state, setState] = useState<AuthState>({
-    user: null,
-    loading: true,
-    isAuthenticated: false,
-  });
 
-  const refreshUser = useCallback(async () => {
-    try {
-      const token = localStorage.getItem("token");
-      if (!token) {
-        setState({ user: null, loading: false, isAuthenticated: false });
-        return;
-      }
+class ProductFilter(django_filters.FilterSet):
+    min_price = django_filters.NumberFilter(field_name="price", lookup_expr="gte")
+    max_price = django_filters.NumberFilter(field_name="price", lookup_expr="lte")
+    category = django_filters.NumberFilter(field_name="category_id")
+    category_slug = django_filters.CharFilter(field_name="category__slug")
+    status = django_filters.ChoiceFilter(choices=Product.STATUS_CHOICES)
+    in_stock = django_filters.BooleanFilter(method="filter_in_stock")
+    on_sale = django_filters.BooleanFilter(method="filter_on_sale")
+    tag = django_filters.CharFilter(method="filter_by_tag")
+    created_after = django_filters.DateTimeFilter(field_name="created_at", lookup_expr="gte")
+    created_before = django_filters.DateTimeFilter(field_name="created_at", lookup_expr="lte")
 
-      api.defaults.headers.common.Authorization = `Bearer ${token}`;
-      const { data } = await api.get("/api/auth/me");
-      setState({ user: data.user, loading: false, isAuthenticated: true });
-    } catch {
-      localStorage.removeItem("token");
-      setState({ user: null, loading: false, isAuthenticated: false });
+    class Meta:
+        model = Product
+        fields = [
+            "min_price", "max_price", "category", "category_slug",
+            "status", "in_stock", "on_sale", "tag",
+            "created_after", "created_before",
+        ]
+
+    def filter_in_stock(self, queryset, name, value):
+        if value:
+            return queryset.filter(stock_quantity__gt=0)
+        return queryset.filter(stock_quantity=0)
+
+    def filter_on_sale(self, queryset, name, value):
+        if value:
+            return queryset.filter(
+                compare_at_price__isnull=False,
+                compare_at_price__gt=models.F("price"),
+            )
+        return queryset
+
+    def filter_by_tag(self, queryset, name, value):
+        return queryset.filter(
+            Q(tags__slug=value) | Q(tags__name__iexact=value)
+        ).distinct()
+""",
+    },
+    # ── Django: Custom pagination ──
+    {
+        "filename": "pagination.py",
+        "code": """\
+from rest_framework.pagination import PageNumberPagination
+from rest_framework.response import Response
+from collections import OrderedDict
+
+
+class StandardPagination(PageNumberPagination):
+    page_size = 20
+    page_size_query_param = "page_size"
+    max_page_size = 100
+
+    def get_paginated_response(self, data):
+        return Response(OrderedDict([
+            ("count", self.page.paginator.count),
+            ("page", self.page.number),
+            ("page_size", self.get_page_size(self.request)),
+            ("total_pages", self.page.paginator.num_pages),
+            ("next", self.get_next_link()),
+            ("previous", self.get_previous_link()),
+            ("results", data),
+        ]))
+
+    def get_paginated_response_schema(self, schema):
+        return {
+            "type": "object",
+            "properties": {
+                "count": {"type": "integer"},
+                "page": {"type": "integer"},
+                "page_size": {"type": "integer"},
+                "total_pages": {"type": "integer"},
+                "next": {"type": "string", "nullable": True},
+                "previous": {"type": "string", "nullable": True},
+                "results": schema,
+            },
+        }
+""",
+    },
+    # ── Django: Admin configuration ──
+    {
+        "filename": "admin.py",
+        "code": """\
+from django.contrib import admin
+from django.utils.html import format_html
+
+from products.models import Product, Category, Tag
+
+
+class ProductInline(admin.TabularInline):
+    model = Product
+    extra = 0
+    fields = ["title", "sku", "price", "stock_quantity", "status"]
+    readonly_fields = ["title", "sku"]
+    show_change_link = True
+
+
+@admin.register(Category)
+class CategoryAdmin(admin.ModelAdmin):
+    list_display = ["name", "slug", "parent", "sort_order", "product_count"]
+    list_editable = ["sort_order"]
+    prepopulated_fields = {"slug": ("name",)}
+    search_fields = ["name"]
+    list_filter = ["parent"]
+    inlines = [ProductInline]
+
+    def product_count(self, obj):
+        return obj.products.count()
+    product_count.short_description = "Products"
+
+
+@admin.register(Product)
+class ProductAdmin(admin.ModelAdmin):
+    list_display = [
+        "title", "sku", "price_display", "stock_quantity",
+        "category", "status", "is_published", "created_at",
+    ]
+    list_filter = ["status", "is_published", "category", "created_at"]
+    search_fields = ["title", "sku", "description"]
+    prepopulated_fields = {"slug": ("title",)}
+    readonly_fields = ["created_at", "updated_at", "created_by"]
+    filter_horizontal = ["tags"]
+    list_per_page = 25
+    date_hierarchy = "created_at"
+    actions = ["publish_selected", "archive_selected"]
+
+    fieldsets = (
+        (None, {
+            "fields": ("title", "slug", "description"),
+        }),
+        ("Pricing & Inventory", {
+            "fields": ("price", "compare_at_price", "sku", "stock_quantity"),
+        }),
+        ("Classification", {
+            "fields": ("category", "tags", "status", "is_published"),
+        }),
+        ("Metadata", {
+            "classes": ("collapse",),
+            "fields": ("created_by", "created_at", "updated_at"),
+        }),
+    )
+
+    def price_display(self, obj):
+        if obj.is_on_sale:
+            return format_html(
+                '<span style="text-decoration:line-through;color:#999">${}</span> '
+                '<span style="color:#e53e3e;font-weight:bold">${}</span>',
+                obj.compare_at_price, obj.price,
+            )
+        return f"${obj.price}"
+    price_display.short_description = "Price"
+
+    def save_model(self, request, obj, form, change):
+        if not change:
+            obj.created_by = request.user
+        super().save_model(request, obj, form, change)
+
+    @admin.action(description="Publish selected products")
+    def publish_selected(self, request, queryset):
+        count = 0
+        for product in queryset.filter(status__in=["draft", "review"]):
+            product.publish()
+            count += 1
+        self.message_user(request, f"{count} product(s) published.")
+
+    @admin.action(description="Archive selected products")
+    def archive_selected(self, request, queryset):
+        count = queryset.update(status="archived", is_published=False)
+        self.message_user(request, f"{count} product(s) archived.")
+
+
+@admin.register(Tag)
+class TagAdmin(admin.ModelAdmin):
+    list_display = ["name", "slug", "product_count"]
+    prepopulated_fields = {"slug": ("name",)}
+    search_fields = ["name"]
+
+    def product_count(self, obj):
+        return obj.products.count()
+    product_count.short_description = "Products"
+""",
+    },
+    # ── Django: Management command ──
+    {
+        "filename": "import_products.py",
+        "code": """\
+import csv
+import sys
+from decimal import Decimal, InvalidOperation
+from pathlib import Path
+
+from django.core.management.base import BaseCommand, CommandError
+from django.db import transaction
+from django.utils.text import slugify
+
+from products.models import Product, Category, Tag
+
+
+class Command(BaseCommand):
+    help = "Import products from a CSV file"
+
+    def add_arguments(self, parser):
+        parser.add_argument("csv_file", type=str, help="Path to CSV file")
+        parser.add_argument(
+            "--dry-run", action="store_true",
+            help="Validate without saving to database",
+        )
+        parser.add_argument(
+            "--update-existing", action="store_true",
+            help="Update products that already exist (matched by SKU)",
+        )
+
+    def handle(self, *args, **options):
+        csv_path = Path(options["csv_file"])
+        if not csv_path.exists():
+            raise CommandError(f"File not found: {csv_path}")
+
+        dry_run = options["dry_run"]
+        update_existing = options["update_existing"]
+        created_count = 0
+        updated_count = 0
+        skipped_count = 0
+        errors = []
+
+        with open(csv_path, newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            required_fields = {"title", "sku", "price", "category"}
+            if not required_fields.issubset(set(reader.fieldnames or [])):
+                missing = required_fields - set(reader.fieldnames or [])
+                raise CommandError(f"Missing required columns: {', '.join(missing)}")
+
+            rows = list(reader)
+
+        self.stdout.write(f"Found {len(rows)} rows to process...")
+
+        with transaction.atomic():
+            for i, row in enumerate(rows, start=2):
+                try:
+                    sku = row["sku"].strip()
+                    if not sku:
+                        errors.append(f"Row {i}: empty SKU")
+                        continue
+
+                    price = Decimal(row["price"].strip())
+                    if price <= 0:
+                        errors.append(f"Row {i}: invalid price {row['price']}")
+                        continue
+
+                    category, _ = Category.objects.get_or_create(
+                        slug=slugify(row["category"].strip()),
+                        defaults={"name": row["category"].strip()},
+                    )
+
+                    existing = Product.objects.filter(sku=sku).first()
+                    if existing:
+                        if update_existing:
+                            existing.title = row["title"].strip()
+                            existing.price = price
+                            existing.category = category
+                            existing.description = row.get("description", "").strip()
+                            stock = row.get("stock_quantity", "").strip()
+                            if stock:
+                                existing.stock_quantity = int(stock)
+                            if not dry_run:
+                                existing.save()
+                            updated_count += 1
+                        else:
+                            skipped_count += 1
+                        continue
+
+                    product = Product(
+                        title=row["title"].strip(),
+                        slug=slugify(row["title"].strip()),
+                        sku=sku,
+                        price=price,
+                        category=category,
+                        description=row.get("description", "").strip(),
+                        stock_quantity=int(row.get("stock_quantity", 0) or 0),
+                        status="draft",
+                    )
+                    if not dry_run:
+                        product.save()
+
+                    tag_str = row.get("tags", "").strip()
+                    if tag_str and not dry_run:
+                        for tag_name in tag_str.split(","):
+                            tag_name = tag_name.strip()
+                            if tag_name:
+                                tag, _ = Tag.objects.get_or_create(
+                                    slug=slugify(tag_name),
+                                    defaults={"name": tag_name},
+                                )
+                                product.tags.add(tag)
+
+                    created_count += 1
+                except (InvalidOperation, ValueError) as e:
+                    errors.append(f"Row {i}: {e}")
+
+            if dry_run:
+                transaction.set_rollback(True)
+                self.stdout.write(self.style.WARNING("DRY RUN — no changes saved"))
+
+        self.stdout.write(self.style.SUCCESS(
+            f"Created: {created_count}, Updated: {updated_count}, Skipped: {skipped_count}"
+        ))
+        if errors:
+            self.stdout.write(self.style.ERROR(f"Errors ({len(errors)}):"))
+            for err in errors:
+                self.stdout.write(f"  {err}")
+""",
+    },
+    # ── Django: Tests ──
+    {
+        "filename": "test_products.py",
+        "code": """\
+import pytest
+from decimal import Decimal
+from django.urls import reverse
+from rest_framework import status
+from rest_framework.test import APIClient
+
+from products.models import Product, Category, Tag
+
+
+@pytest.fixture
+def api_client(db, django_user_model):
+    user = django_user_model.objects.create_user(
+        username="testuser", password="testpass123"
+    )
+    client = APIClient()
+    client.force_authenticate(user=user)
+    return client, user
+
+
+@pytest.fixture
+def category(db):
+    return Category.objects.create(name="Electronics", slug="electronics")
+
+
+@pytest.fixture
+def sample_product(db, category):
+    return Product.objects.create(
+        title="Wireless Keyboard",
+        slug="wireless-keyboard",
+        sku="KB-001",
+        price=Decimal("79.99"),
+        stock_quantity=50,
+        category=category,
+        status="published",
+        is_published=True,
+    )
+
+
+class TestProductModel:
+    def test_str_representation(self, sample_product):
+        assert str(sample_product) == "Wireless Keyboard"
+
+    def test_in_stock_property(self, sample_product):
+        assert sample_product.in_stock is True
+        sample_product.stock_quantity = 0
+        assert sample_product.in_stock is False
+
+    def test_not_on_sale_without_compare_price(self, sample_product):
+        assert sample_product.is_on_sale is False
+        assert sample_product.discount_percentage == 0
+
+    def test_on_sale_with_compare_price(self, sample_product):
+        sample_product.compare_at_price = Decimal("99.99")
+        assert sample_product.is_on_sale is True
+        assert sample_product.discount_percentage == 20
+
+    def test_publish_sets_fields(self, sample_product):
+        sample_product.status = "draft"
+        sample_product.is_published = False
+        sample_product.published_at = None
+        sample_product.publish()
+        sample_product.refresh_from_db()
+        assert sample_product.status == "published"
+        assert sample_product.is_published is True
+        assert sample_product.published_at is not None
+
+
+class TestProductAPI:
+    def test_list_products(self, api_client, sample_product):
+        client, _ = api_client
+        url = reverse("product-list")
+        response = client.get(url)
+        assert response.status_code == status.HTTP_200_OK
+        assert response.data["count"] >= 1
+
+    def test_create_product(self, api_client, category):
+        client, _ = api_client
+        url = reverse("product-list")
+        data = {
+            "title": "USB-C Hub",
+            "sku": "HUB-001",
+            "price": "49.99",
+            "category_id": category.id,
+            "stock_quantity": 100,
+        }
+        response = client.post(url, data, format="json")
+        assert response.status_code == status.HTTP_201_CREATED
+        assert Product.objects.filter(sku="HUB-001").exists()
+
+    def test_create_duplicate_sku_fails(self, api_client, sample_product, category):
+        client, _ = api_client
+        url = reverse("product-list")
+        data = {
+            "title": "Another Product",
+            "sku": "KB-001",
+            "price": "29.99",
+            "category_id": category.id,
+        }
+        response = client.post(url, data, format="json")
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+
+    def test_filter_by_category(self, api_client, sample_product, category):
+        client, _ = api_client
+        url = reverse("product-list")
+        response = client.get(url, {"category": category.id})
+        assert response.status_code == status.HTTP_200_OK
+        for item in response.data["results"]:
+            assert item["category"] == category.id
+
+    def test_search_products(self, api_client, sample_product):
+        client, _ = api_client
+        url = reverse("product-list")
+        response = client.get(url, {"search": "wireless"})
+        assert response.status_code == status.HTTP_200_OK
+        assert response.data["count"] >= 1
+
+    def test_adjust_stock(self, api_client, sample_product):
+        client, _ = api_client
+        url = reverse("product-adjust-stock", args=[sample_product.pk])
+        response = client.post(url, {"delta": -10}, format="json")
+        assert response.status_code == status.HTTP_200_OK
+        assert response.data["stock_quantity"] == 40
+
+    def test_adjust_stock_below_zero_fails(self, api_client, sample_product):
+        client, _ = api_client
+        url = reverse("product-adjust-stock", args=[sample_product.pk])
+        response = client.post(url, {"delta": -999}, format="json")
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+""",
+    },
+    # ── FastAPI: Main app with middleware ──
+    {
+        "filename": "main.py",
+        "code": """\
+from contextlib import asynccontextmanager
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
+import logging
+import time
+
+from app.config import settings
+from app.database import engine, Base
+from app.routers import products, categories, auth, health
+
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("Starting up — creating database tables")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    yield
+    logger.info("Shutting down — disposing engine")
+    await engine.dispose()
+
+
+app = FastAPI(
+    title=settings.PROJECT_NAME,
+    version="1.0.0",
+    docs_url="/api/docs",
+    openapi_url="/api/openapi.json",
+    lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.add_middleware(
+    TrustedHostMiddleware,
+    allowed_hosts=settings.ALLOWED_HOSTS,
+)
+
+
+@app.middleware("http")
+async def add_timing_header(request, call_next):
+    start = time.perf_counter()
+    response = await call_next(request)
+    elapsed = time.perf_counter() - start
+    response.headers["X-Process-Time"] = f"{elapsed:.4f}"
+    return response
+
+
+app.include_router(health.router, prefix="/api", tags=["health"])
+app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
+app.include_router(products.router, prefix="/api/v1", tags=["products"])
+app.include_router(categories.router, prefix="/api/v1", tags=["categories"])
+""",
+    },
+    # ── FastAPI: Database & models ──
+    {
+        "filename": "database.py",
+        "code": """\
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy import String, Integer, Boolean, DateTime, ForeignKey, Numeric, Text
+from datetime import datetime
+from typing import Optional
+
+from app.config import settings
+
+engine = create_async_engine(settings.DATABASE_URL, echo=settings.DEBUG, pool_size=20)
+async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+class TimestampMixin:
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
+class Category(TimestampMixin, Base):
+    __tablename__ = "categories"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    slug: Mapped[str] = mapped_column(String(120), unique=True, nullable=False)
+    parent_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("categories.id"), nullable=True
+    )
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class Product(TimestampMixin, Base):
+    __tablename__ = "products"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    slug: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    price: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False)
+    compare_at_price: Mapped[Optional[float]] = mapped_column(Numeric(10, 2), nullable=True)
+    sku: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)
+    stock_quantity: Mapped[int] = mapped_column(Integer, default=0)
+    category_id: Mapped[int] = mapped_column(Integer, ForeignKey("categories.id"), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="draft")
+    is_published: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class User(TimestampMixin, Base):
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+async def get_db():
+    async with async_session() as session:
+        try:
+            yield session
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
+""",
+    },
+    # ── FastAPI: Product routes ──
+    {
+        "filename": "products_router.py",
+        "code": """\
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, func, and_
+from typing import Optional
+
+from app.database import get_db, Product, Category
+from app.schemas import (
+    ProductCreate,
+    ProductUpdate,
+    ProductResponse,
+    ProductListResponse,
+)
+from app.auth import get_current_user, require_admin
+
+router = APIRouter()
+
+
+@router.get("/products", response_model=ProductListResponse)
+async def list_products(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    category_id: Optional[int] = None,
+    status: Optional[str] = None,
+    search: Optional[str] = None,
+    min_price: Optional[float] = None,
+    max_price: Optional[float] = None,
+    in_stock: Optional[bool] = None,
+    sort_by: str = Query("created_at", regex="^(title|price|created_at|stock_quantity)$"),
+    sort_dir: str = Query("desc", regex="^(asc|desc)$"),
+    db: AsyncSession = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    query = select(Product)
+
+    if not user.is_admin:
+        query = query.where(Product.is_published == True)
+
+    if category_id:
+        query = query.where(Product.category_id == category_id)
+    if status:
+        query = query.where(Product.status == status)
+    if search:
+        query = query.where(
+            Product.title.ilike(f"%{search}%")
+            | Product.sku.ilike(f"%{search}%")
+        )
+    if min_price is not None:
+        query = query.where(Product.price >= min_price)
+    if max_price is not None:
+        query = query.where(Product.price <= max_price)
+    if in_stock is True:
+        query = query.where(Product.stock_quantity > 0)
+    elif in_stock is False:
+        query = query.where(Product.stock_quantity == 0)
+
+    count_query = select(func.count()).select_from(query.subquery())
+    total = (await db.execute(count_query)).scalar()
+
+    sort_column = getattr(Product, sort_by)
+    if sort_dir == "desc":
+        sort_column = sort_column.desc()
+    query = query.order_by(sort_column).offset((page - 1) * page_size).limit(page_size)
+
+    result = await db.execute(query)
+    products = result.scalars().all()
+
+    return {
+        "results": products,
+        "count": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": (total + page_size - 1) // page_size,
     }
-  }, []);
 
-  useEffect(() => {
-    refreshUser();
-  }, [refreshUser]);
 
-  const login = async (email: string, password: string) => {
-    const { data } = await api.post("/api/auth/login", { email, password });
-    localStorage.setItem("token", data.token);
-    api.defaults.headers.common.Authorization = `Bearer ${data.token}`;
-    setState({ user: data.user, loading: false, isAuthenticated: true });
-    router.push("/dashboard");
-  };
+@router.get("/products/{product_id}", response_model=ProductResponse)
+async def get_product(
+    product_id: int,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    result = await db.execute(select(Product).where(Product.id == product_id))
+    product = result.scalar_one_or_none()
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+    if not product.is_published and not user.is_admin:
+        raise HTTPException(status_code=404, detail="Product not found")
+    return product
 
-  const logout = async () => {
-    try {
-      await api.post("/api/auth/logout");
-    } finally {
-      localStorage.removeItem("token");
-      delete api.defaults.headers.common.Authorization;
-      setState({ user: null, loading: false, isAuthenticated: false });
-      router.push("/login");
+
+@router.post("/products", response_model=ProductResponse, status_code=201)
+async def create_product(
+    payload: ProductCreate,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_admin),
+):
+    existing = await db.execute(select(Product).where(Product.sku == payload.sku))
+    if existing.scalar_one_or_none():
+        raise HTTPException(status_code=409, detail="SKU already exists")
+
+    cat = await db.execute(select(Category).where(Category.id == payload.category_id))
+    if not cat.scalar_one_or_none():
+        raise HTTPException(status_code=400, detail="Invalid category")
+
+    product = Product(**payload.model_dump())
+    db.add(product)
+    await db.flush()
+    await db.refresh(product)
+    return product
+
+
+@router.patch("/products/{product_id}", response_model=ProductResponse)
+async def update_product(
+    product_id: int,
+    payload: ProductUpdate,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_admin),
+):
+    result = await db.execute(select(Product).where(Product.id == product_id))
+    product = result.scalar_one_or_none()
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+
+    update_data = payload.model_dump(exclude_unset=True)
+    for field, value in update_data.items():
+        setattr(product, field, value)
+
+    await db.flush()
+    await db.refresh(product)
+    return product
+
+
+@router.delete("/products/{product_id}", status_code=204)
+async def delete_product(
+    product_id: int,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_admin),
+):
+    result = await db.execute(select(Product).where(Product.id == product_id))
+    product = result.scalar_one_or_none()
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+    await db.delete(product)
+""",
+    },
+    # ── FastAPI: Pydantic schemas ──
+    {
+        "filename": "schemas.py",
+        "code": """\
+from pydantic import BaseModel, Field, field_validator, model_validator
+from typing import Optional
+from datetime import datetime
+
+
+class CategoryBase(BaseModel):
+    name: str = Field(..., min_length=1, max_length=120)
+    slug: str = Field(..., min_length=1, max_length=120)
+    parent_id: Optional[int] = None
+    sort_order: int = 0
+
+
+class CategoryCreate(CategoryBase):
+    pass
+
+
+class CategoryResponse(CategoryBase):
+    id: int
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class ProductBase(BaseModel):
+    title: str = Field(..., min_length=1, max_length=255)
+    slug: Optional[str] = None
+    description: Optional[str] = None
+    price: float = Field(..., gt=0)
+    compare_at_price: Optional[float] = None
+    sku: str = Field(..., min_length=1, max_length=50)
+    stock_quantity: int = Field(default=0, ge=0)
+    category_id: int
+
+    @field_validator("sku")
+    @classmethod
+    def sku_must_be_uppercase(cls, v: str) -> str:
+        return v.upper().strip()
+
+    @model_validator(mode="after")
+    def check_compare_price(self):
+        if self.compare_at_price is not None and self.compare_at_price <= self.price:
+            raise ValueError("compare_at_price must be greater than price")
+        return self
+
+
+class ProductCreate(ProductBase):
+    status: str = Field(default="draft", pattern="^(draft|review|published)$")
+
+
+class ProductUpdate(BaseModel):
+    title: Optional[str] = Field(None, min_length=1, max_length=255)
+    description: Optional[str] = None
+    price: Optional[float] = Field(None, gt=0)
+    compare_at_price: Optional[float] = None
+    sku: Optional[str] = Field(None, min_length=1, max_length=50)
+    stock_quantity: Optional[int] = Field(None, ge=0)
+    category_id: Optional[int] = None
+    status: Optional[str] = Field(None, pattern="^(draft|review|published|archived)$")
+    is_published: Optional[bool] = None
+
+
+class ProductResponse(ProductBase):
+    id: int
+    status: str
+    is_published: bool
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+    @property
+    def is_on_sale(self) -> bool:
+        return (
+            self.compare_at_price is not None
+            and self.compare_at_price > self.price
+        )
+
+    @property
+    def discount_percentage(self) -> int:
+        if not self.is_on_sale:
+            return 0
+        diff = self.compare_at_price - self.price
+        return int((diff / self.compare_at_price) * 100)
+
+
+class ProductListResponse(BaseModel):
+    results: list[ProductResponse]
+    count: int
+    page: int
+    page_size: int
+    total_pages: int
+""",
+    },
+    # ── FastAPI: Auth with JWT ──
+    {
+        "filename": "auth.py",
+        "code": """\
+from datetime import datetime, timedelta
+from typing import Optional
+
+from fastapi import Depends, HTTPException, status
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from jose import JWTError, jwt
+from passlib.context import CryptContext
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.config import settings
+from app.database import get_db, User
+
+security = HTTPBearer()
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24
+
+
+def hash_password(password: str) -> str:
+    return pwd_context.hash(password)
+
+
+def verify_password(plain: str, hashed: str) -> bool:
+    return pwd_context.verify(plain, hashed)
+
+
+def create_access_token(user_id: int, email: str, is_admin: bool) -> str:
+    expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    payload = {
+        "sub": str(user_id),
+        "email": email,
+        "is_admin": is_admin,
+        "exp": expire,
     }
-  };
+    return jwt.encode(payload, settings.SECRET_KEY, algorithm=ALGORITHM)
 
-  return { ...state, login, logout, refreshUser };
-}
 
-export { AuthContext };
+def decode_token(token: str) -> dict:
+    try:
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[ALGORITHM])
+        return payload
+    except JWTError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token",
+        )
+
+
+async def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: AsyncSession = Depends(get_db),
+) -> User:
+    payload = decode_token(credentials.credentials)
+    user_id = int(payload["sub"])
+
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+
+    if not user or not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found or inactive",
+        )
+    return user
+
+
+async def require_admin(user: User = Depends(get_current_user)) -> User:
+    if not user.is_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required",
+        )
+    return user
+""",
+    },
+    # ── FastAPI: Config with Pydantic settings ──
+    {
+        "filename": "config.py",
+        "code": """\
+from pydantic_settings import BaseSettings
+from functools import lru_cache
+from typing import Optional
+
+
+class Settings(BaseSettings):
+    PROJECT_NAME: str = "Product Catalog API"
+    DEBUG: bool = False
+    VERSION: str = "1.0.0"
+
+    DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/catalog"
+    REDIS_URL: str = "redis://localhost:6379/0"
+
+    SECRET_KEY: str = "change-me-in-production"
+    ALLOWED_ORIGINS: list[str] = ["http://localhost:3000", "http://localhost:5173"]
+    ALLOWED_HOSTS: list[str] = ["localhost", "127.0.0.1"]
+
+    SMTP_HOST: Optional[str] = None
+    SMTP_PORT: int = 587
+    SMTP_USER: Optional[str] = None
+    SMTP_PASSWORD: Optional[str] = None
+    FROM_EMAIL: str = "noreply@example.com"
+
+    S3_BUCKET: Optional[str] = None
+    S3_REGION: str = "us-east-1"
+    AWS_ACCESS_KEY_ID: Optional[str] = None
+    AWS_SECRET_ACCESS_KEY: Optional[str] = None
+
+    LOG_LEVEL: str = "INFO"
+
+    model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+
+
+@lru_cache()
+def get_settings() -> Settings:
+    return Settings()
+
+
+settings = get_settings()
+""",
+    },
+    # ── Django: Celery tasks ──
+    {
+        "filename": "tasks.py",
+        "code": """\
+import logging
+from datetime import timedelta
+
+from celery import shared_task
+from django.utils import timezone
+from django.core.mail import send_mail
+from django.conf import settings
+from django.db.models import F, Q
+
+from products.models import Product, Category
+
+logger = logging.getLogger(__name__)
+
+
+@shared_task(bind=True, max_retries=3, default_retry_delay=60)
+def check_low_stock(self, threshold=10):
+    low_stock = Product.objects.filter(
+        is_published=True,
+        stock_quantity__lte=threshold,
+        stock_quantity__gt=0,
+    ).select_related("category")
+
+    count = low_stock.count()
+    if count == 0:
+        logger.info("No low-stock products found")
+        return {"checked": True, "low_stock_count": 0}
+
+    product_lines = []
+    for p in low_stock[:50]:
+        product_lines.append(
+            f"  - {p.title} (SKU: {p.sku}) — {p.stock_quantity} remaining"
+        )
+
+    body = f"The following {count} product(s) are running low on stock:\\n\\n"
+    body += "\\n".join(product_lines)
+    if count > 50:
+        body += f"\\n  ... and {count - 50} more"
+
+    try:
+        send_mail(
+            subject=f"[Catalog] {count} product(s) low on stock",
+            message=body,
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            recipient_list=[settings.STOCK_ALERT_EMAIL],
+            fail_silently=False,
+        )
+    except Exception as exc:
+        logger.error("Failed to send low-stock email: %s", exc)
+        raise self.retry(exc=exc)
+
+    return {"checked": True, "low_stock_count": count}
+
+
+@shared_task
+def sync_category_counts():
+    categories = Category.objects.all()
+    updated = 0
+    for cat in categories:
+        count = cat.products.filter(is_published=True).count()
+        if hasattr(cat, "cached_product_count") and cat.cached_product_count != count:
+            cat.cached_product_count = count
+            cat.save(update_fields=["cached_product_count"])
+            updated += 1
+    logger.info("Updated %d category counts", updated)
+    return {"updated": updated}
+
+
+@shared_task
+def archive_stale_drafts(days=90):
+    cutoff = timezone.now() - timedelta(days=days)
+    stale = Product.objects.filter(
+        status="draft",
+        updated_at__lt=cutoff,
+    )
+    count = stale.update(status="archived")
+    logger.info("Archived %d stale draft products older than %d days", count, days)
+    return {"archived": count}
+
+
+@shared_task(bind=True, max_retries=2)
+def generate_price_report(self, category_id=None):
+    from django.db.models import Avg, Min, Max, Count
+
+    qs = Product.objects.filter(is_published=True)
+    if category_id:
+        qs = qs.filter(category_id=category_id)
+
+    stats = qs.aggregate(
+        total=Count("id"),
+        avg_price=Avg("price"),
+        min_price=Min("price"),
+        max_price=Max("price"),
+    )
+
+    by_category = (
+        qs.values("category__name")
+        .annotate(
+            count=Count("id"),
+            avg_price=Avg("price"),
+        )
+        .order_by("-count")
+    )
+
+    report = {
+        "generated_at": timezone.now().isoformat(),
+        "overall": stats,
+        "by_category": list(by_category),
+    }
+
+    logger.info("Price report generated: %d products", stats["total"])
+    return report
+""",
+    },
+    # ── FastAPI: Tests ──
+    {
+        "filename": "test_api.py",
+        "code": """\
+import pytest
+from httpx import AsyncClient, ASGITransport
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
+
+from app.main import app
+from app.database import Base, get_db
+from app.auth import hash_password
+
+TEST_DB_URL = "sqlite+aiosqlite:///./test.db"
+engine = create_async_engine(TEST_DB_URL, echo=False)
+TestSession = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+
+@pytest.fixture(autouse=True)
+async def setup_db():
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    yield
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+
+
+async def override_get_db():
+    async with TestSession() as session:
+        yield session
+        await session.commit()
+
+
+app.dependency_overrides[get_db] = override_get_db
+
+
+@pytest.fixture
+async def client():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        yield ac
+
+
+@pytest.fixture
+async def auth_headers(client):
+    from app.database import User
+    async with TestSession() as db:
+        user = User(
+            email="admin@test.com",
+            name="Admin User",
+            hashed_password=hash_password("password123"),
+            is_active=True,
+            is_admin=True,
+        )
+        db.add(user)
+        await db.commit()
+        await db.refresh(user)
+
+    response = await client.post("/api/auth/login", json={
+        "email": "admin@test.com",
+        "password": "password123",
+    })
+    token = response.json()["access_token"]
+    return {"Authorization": f"Bearer {token}"}
+
+
+@pytest.fixture
+async def sample_category(auth_headers):
+    async with TestSession() as db:
+        from app.database import Category
+        cat = Category(name="Electronics", slug="electronics")
+        db.add(cat)
+        await db.commit()
+        await db.refresh(cat)
+        return cat
+
+
+@pytest.mark.asyncio
+class TestHealthCheck:
+    async def test_health(self, client):
+        response = await client.get("/api/health")
+        assert response.status_code == 200
+        assert response.json()["status"] == "ok"
+
+
+@pytest.mark.asyncio
+class TestProducts:
+    async def test_create_product(self, client, auth_headers, sample_category):
+        response = await client.post(
+            "/api/v1/products",
+            headers=auth_headers,
+            json={
+                "title": "Wireless Mouse",
+                "sku": "MOUSE-001",
+                "price": 29.99,
+                "category_id": sample_category.id,
+                "stock_quantity": 100,
+            },
+        )
+        assert response.status_code == 201
+        data = response.json()
+        assert data["title"] == "Wireless Mouse"
+        assert data["sku"] == "MOUSE-001"
+
+    async def test_list_products(self, client, auth_headers, sample_category):
+        await client.post(
+            "/api/v1/products",
+            headers=auth_headers,
+            json={
+                "title": "Keyboard",
+                "sku": "KB-001",
+                "price": 79.99,
+                "category_id": sample_category.id,
+                "status": "published",
+            },
+        )
+        response = await client.get("/api/v1/products", headers=auth_headers)
+        assert response.status_code == 200
+        assert response.json()["count"] >= 1
+
+    async def test_duplicate_sku_rejected(self, client, auth_headers, sample_category):
+        payload = {
+            "title": "Product A",
+            "sku": "DUP-001",
+            "price": 10.00,
+            "category_id": sample_category.id,
+        }
+        await client.post("/api/v1/products", headers=auth_headers, json=payload)
+        response = await client.post("/api/v1/products", headers=auth_headers, json={
+            **payload, "title": "Product B",
+        })
+        assert response.status_code == 409
+
+    async def test_update_product(self, client, auth_headers, sample_category):
+        create_resp = await client.post(
+            "/api/v1/products",
+            headers=auth_headers,
+            json={
+                "title": "Old Name",
+                "sku": "UPD-001",
+                "price": 50.00,
+                "category_id": sample_category.id,
+            },
+        )
+        product_id = create_resp.json()["id"]
+        response = await client.patch(
+            f"/api/v1/products/{product_id}",
+            headers=auth_headers,
+            json={"title": "New Name", "price": 55.00},
+        )
+        assert response.status_code == 200
+        assert response.json()["title"] == "New Name"
+        assert response.json()["price"] == 55.00
+
+    async def test_delete_product(self, client, auth_headers, sample_category):
+        create_resp = await client.post(
+            "/api/v1/products",
+            headers=auth_headers,
+            json={
+                "title": "To Delete",
+                "sku": "DEL-001",
+                "price": 10.00,
+                "category_id": sample_category.id,
+            },
+        )
+        product_id = create_resp.json()["id"]
+        response = await client.delete(
+            f"/api/v1/products/{product_id}", headers=auth_headers
+        )
+        assert response.status_code == 204
+
+    async def test_filter_by_price_range(self, client, auth_headers, sample_category):
+        for i, price in enumerate([10, 50, 100]):
+            await client.post(
+                "/api/v1/products",
+                headers=auth_headers,
+                json={
+                    "title": f"Product {i}",
+                    "sku": f"PRICE-{i}",
+                    "price": price,
+                    "category_id": sample_category.id,
+                    "is_published": True,
+                    "status": "published",
+                },
+            )
+        response = await client.get(
+            "/api/v1/products",
+            headers=auth_headers,
+            params={"min_price": 20, "max_price": 80},
+        )
+        assert response.status_code == 200
+        for item in response.json()["results"]:
+            assert 20 <= item["price"] <= 80
+""",
+    },
+    # ── Django: Middleware ──
+    {
+        "filename": "middleware.py",
+        "code": """\
+import logging
+import time
+import uuid
+from django.utils.deprecation import MiddlewareMixin
+
+logger = logging.getLogger("api.requests")
+
+
+class RequestLoggingMiddleware(MiddlewareMixin):
+    def process_request(self, request):
+        request._start_time = time.perf_counter()
+        request._request_id = str(uuid.uuid4())[:8]
+
+    def process_response(self, request, response):
+        if not hasattr(request, "_start_time"):
+            return response
+
+        elapsed = time.perf_counter() - request._start_time
+        response["X-Request-ID"] = request._request_id
+        response["X-Process-Time"] = f"{elapsed:.4f}"
+
+        logger.info(
+            "%(method)s %(path)s %(status)s %(time).4fs [%(request_id)s]",
+            {
+                "method": request.method,
+                "path": request.get_full_path(),
+                "status": response.status_code,
+                "time": elapsed,
+                "request_id": request._request_id,
+            },
+        )
+
+        return response
+
+
+class CORSMiddleware(MiddlewareMixin):
+    ALLOWED_ORIGINS = [
+        "http://localhost:3000",
+        "http://localhost:5173",
+    ]
+
+    def process_response(self, request, response):
+        origin = request.META.get("HTTP_ORIGIN")
+        if origin in self.ALLOWED_ORIGINS:
+            response["Access-Control-Allow-Origin"] = origin
+            response["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+            response["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+            response["Access-Control-Allow-Credentials"] = "true"
+            response["Access-Control-Max-Age"] = "86400"
+        return response
+
+    def process_request(self, request):
+        if request.method == "OPTIONS":
+            from django.http import HttpResponse
+            response = HttpResponse()
+            origin = request.META.get("HTTP_ORIGIN")
+            if origin in self.ALLOWED_ORIGINS:
+                response["Access-Control-Allow-Origin"] = origin
+                response["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+                response["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+                response["Access-Control-Max-Age"] = "86400"
+            response.status_code = 204
+            return response
+        return None
+""",
+    },
+    # ── Django: Signals ──
+    {
+        "filename": "signals.py",
+        "code": """\
+import logging
+from django.db.models.signals import post_save, pre_save
+from django.dispatch import receiver
+from django.utils.text import slugify
+from django.core.cache import cache
+
+from products.models import Product, Category
+
+logger = logging.getLogger(__name__)
+
+
+@receiver(pre_save, sender=Product)
+def auto_generate_slug(sender, instance, **kwargs):
+    if not instance.slug:
+        base_slug = slugify(instance.title)
+        slug = base_slug
+        counter = 1
+        while Product.objects.filter(slug=slug).exclude(pk=instance.pk).exists():
+            slug = f"{base_slug}-{counter}"
+            counter += 1
+        instance.slug = slug
+
+
+@receiver(post_save, sender=Product)
+def invalidate_product_cache(sender, instance, **kwargs):
+    cache_keys = [
+        f"product:{instance.pk}",
+        f"product:slug:{instance.slug}",
+        f"product_list:category:{instance.category_id}",
+        "product_stats",
+    ]
+    cache.delete_many(cache_keys)
+    logger.debug("Invalidated cache keys for product %s: %s", instance.pk, cache_keys)
+
+
+@receiver(post_save, sender=Product)
+def log_product_changes(sender, instance, created, **kwargs):
+    if created:
+        logger.info(
+            "Product created: %s (SKU: %s, Price: %s, Category: %s)",
+            instance.title,
+            instance.sku,
+            instance.price,
+            instance.category_id,
+        )
+    else:
+        logger.info(
+            "Product updated: %s (SKU: %s, Status: %s)",
+            instance.title,
+            instance.sku,
+            instance.status,
+        )
+
+
+@receiver(post_save, sender=Product)
+def notify_on_publish(sender, instance, **kwargs):
+    if instance.status == "published" and instance.is_published:
+        try:
+            from products.tasks import notify_product_published
+            notify_product_published.delay(instance.pk)
+        except Exception as exc:
+            logger.warning("Failed to queue publish notification: %s", exc)
+
+
+@receiver(pre_save, sender=Category)
+def auto_category_slug(sender, instance, **kwargs):
+    if not instance.slug:
+        base_slug = slugify(instance.name)
+        slug = base_slug
+        counter = 1
+        while Category.objects.filter(slug=slug).exclude(pk=instance.pk).exists():
+            slug = f"{base_slug}-{counter}"
+            counter += 1
+        instance.slug = slug
 """,
     },
 ]
