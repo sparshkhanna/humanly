@@ -627,476 +627,693 @@ def ensure_windsurf_focus():
 
 CODE_TEMPLATES = [
     # ══════════════════════════════════════════════════════════════
-    # REALISTIC WORK TEMPLATES — Django + FastAPI Project
+    # REALISTIC WORK TEMPLATES — Django HR / Employee Management
     # ══════════════════════════════════════════════════════════════
 
-    # ── Django: Product model with custom manager ──
+    # ── Django: Employee & Department models ──
     {
         "filename": "models.py",
         "code": """\
 from django.db import models
 from django.conf import settings
 from django.utils import timezone
-from django.core.validators import MinValueValidator
-from decimal import Decimal
 
 
-class PublishedManager(models.Manager):
-    def get_queryset(self):
-        return super().get_queryset().filter(
-            is_published=True,
-            published_at__lte=timezone.now(),
-        )
-
-
-class Category(models.Model):
-    name = models.CharField(max_length=120)
-    slug = models.SlugField(unique=True)
-    parent = models.ForeignKey(
-        "self", null=True, blank=True,
-        on_delete=models.SET_NULL,
-        related_name="children",
+class Department(models.Model):
+    name = models.CharField(max_length=150)
+    code = models.CharField(max_length=10, unique=True)
+    head = models.ForeignKey(
+        "Employee", on_delete=models.SET_NULL, null=True,
+        blank=True, related_name="headed_department",
     )
-    sort_order = models.PositiveIntegerField(default=0)
+    parent = models.ForeignKey(
+        "self", on_delete=models.SET_NULL, null=True,
+        blank=True, related_name="sub_departments",
+    )
+    budget = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        verbose_name_plural = "categories"
-        ordering = ["sort_order", "name"]
+        ordering = ["name"]
 
     def __str__(self):
-        return self.name
+        return f"{self.code} - {self.name}"
 
     @property
-    def full_path(self):
-        parts = [self.name]
-        current = self.parent
-        while current:
-            parts.insert(0, current.name)
-            current = current.parent
-        return " > ".join(parts)
+    def employee_count(self):
+        return self.employees.filter(is_active=True).count()
+
+    @property
+    def total_salary_expense(self):
+        return self.employees.filter(
+            is_active=True
+        ).aggregate(
+            total=models.Sum("salary")
+        )["total"] or 0
 
 
-class Product(models.Model):
-    STATUS_CHOICES = [
-        ("draft", "Draft"),
-        ("review", "In Review"),
-        ("published", "Published"),
-        ("archived", "Archived"),
+class Employee(models.Model):
+    ROLE_CHOICES = [
+        ("engineer", "Engineer"),
+        ("designer", "Designer"),
+        ("manager", "Manager"),
+        ("analyst", "Analyst"),
+        ("support", "Support"),
+        ("admin", "Admin"),
     ]
 
-    title = models.CharField(max_length=255)
-    slug = models.SlugField(unique=True)
-    description = models.TextField(blank=True)
-    price = models.DecimalField(
-        max_digits=10, decimal_places=2,
-        validators=[MinValueValidator(Decimal("0.01"))],
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="employee"
     )
-    compare_at_price = models.DecimalField(
-        max_digits=10, decimal_places=2,
-        null=True, blank=True,
+    employee_id = models.CharField(max_length=20, unique=True, db_index=True)
+    department = models.ForeignKey(
+        Department, on_delete=models.PROTECT, related_name="employees"
     )
-    sku = models.CharField(max_length=50, unique=True)
-    stock_quantity = models.PositiveIntegerField(default=0)
-    category = models.ForeignKey(
-        Category, on_delete=models.PROTECT,
-        related_name="products",
+    role = models.CharField(max_length=20, choices=ROLE_CHOICES)
+    title = models.CharField(max_length=100)
+    salary = models.DecimalField(max_digits=10, decimal_places=2)
+    hire_date = models.DateField()
+    manager = models.ForeignKey(
+        "self", on_delete=models.SET_NULL, null=True,
+        blank=True, related_name="direct_reports",
     )
-    tags = models.ManyToManyField("Tag", blank=True, related_name="products")
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="draft")
-    is_published = models.BooleanField(default=False)
-    published_at = models.DateTimeField(null=True, blank=True)
-    created_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.SET_NULL, null=True,
-    )
+    phone = models.CharField(max_length=20, blank=True)
+    is_active = models.BooleanField(default=True)
+    is_remote = models.BooleanField(default=False)
+    notes = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
-    objects = models.Manager()
-    published = PublishedManager()
-
     class Meta:
-        ordering = ["-created_at"]
+        ordering = ["employee_id"]
         indexes = [
-            models.Index(fields=["slug"]),
-            models.Index(fields=["sku"]),
-            models.Index(fields=["status", "is_published"]),
-            models.Index(fields=["category", "-created_at"]),
+            models.Index(fields=["department", "is_active"]),
+            models.Index(fields=["manager"]),
         ]
 
     def __str__(self):
-        return self.title
+        return f"{self.employee_id} - {self.user.get_full_name()}"
 
     @property
-    def is_on_sale(self):
-        return (
-            self.compare_at_price is not None
-            and self.compare_at_price > self.price
-        )
+    def tenure_days(self):
+        return (timezone.now().date() - self.hire_date).days
 
     @property
-    def discount_percentage(self):
-        if not self.is_on_sale:
-            return 0
-        diff = self.compare_at_price - self.price
-        return int((diff / self.compare_at_price) * 100)
-
-    @property
-    def in_stock(self):
-        return self.stock_quantity > 0
-
-    def publish(self):
-        self.status = "published"
-        self.is_published = True
-        self.published_at = timezone.now()
-        self.save(update_fields=["status", "is_published", "published_at", "updated_at"])
+    def direct_report_count(self):
+        return self.direct_reports.filter(is_active=True).count()
 
 
-class Tag(models.Model):
-    name = models.CharField(max_length=60, unique=True)
-    slug = models.SlugField(unique=True)
+class LeaveRequest(models.Model):
+    TYPE_CHOICES = [
+        ("annual", "Annual Leave"),
+        ("sick", "Sick Leave"),
+        ("personal", "Personal Leave"),
+        ("parental", "Parental Leave"),
+        ("unpaid", "Unpaid Leave"),
+    ]
+    STATUS_CHOICES = [
+        ("pending", "Pending"),
+        ("approved", "Approved"),
+        ("rejected", "Rejected"),
+        ("cancelled", "Cancelled"),
+    ]
+
+    employee = models.ForeignKey(
+        Employee, on_delete=models.CASCADE, related_name="leave_requests"
+    )
+    leave_type = models.CharField(max_length=20, choices=TYPE_CHOICES)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending")
+    start_date = models.DateField()
+    end_date = models.DateField()
+    reason = models.TextField(blank=True)
+    reviewed_by = models.ForeignKey(
+        Employee, on_delete=models.SET_NULL, null=True,
+        blank=True, related_name="reviewed_leaves",
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
 
     def __str__(self):
-        return self.name
+        return f"{self.employee} - {self.leave_type} ({self.start_date} to {self.end_date})"
+
+    @property
+    def duration_days(self):
+        return (self.end_date - self.start_date).days + 1
+
+    def approve(self, reviewer):
+        self.status = "approved"
+        self.reviewed_by = reviewer
+        self.reviewed_at = timezone.now()
+        self.save()
+
+    def reject(self, reviewer):
+        self.status = "rejected"
+        self.reviewed_by = reviewer
+        self.reviewed_at = timezone.now()
+        self.save()
 """,
     },
-    # ── Django: Serializers ──
+    # ── Django: DRF Serializers for HR ──
     {
         "filename": "serializers.py",
         "code": """\
 from rest_framework import serializers
-from django.utils.text import slugify
+from django.contrib.auth import get_user_model
+from django.utils import timezone
 
-from products.models import Product, Category, Tag
+from .models import Department, Employee, LeaveRequest
 
-
-class TagSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Tag
-        fields = ["id", "name", "slug"]
-        read_only_fields = ["slug"]
+User = get_user_model()
 
 
-class CategorySerializer(serializers.ModelSerializer):
-    full_path = serializers.ReadOnlyField()
-    product_count = serializers.SerializerMethodField()
+class DepartmentSerializer(serializers.ModelSerializer):
+    employee_count = serializers.ReadOnlyField()
+    head_name = serializers.SerializerMethodField()
 
     class Meta:
-        model = Category
-        fields = ["id", "name", "slug", "parent", "sort_order", "full_path", "product_count"]
-
-    def get_product_count(self, obj):
-        return obj.products.filter(is_published=True).count()
-
-
-class ProductListSerializer(serializers.ModelSerializer):
-    category_name = serializers.CharField(source="category.name", read_only=True)
-    is_on_sale = serializers.ReadOnlyField()
-    discount_percentage = serializers.ReadOnlyField()
-    in_stock = serializers.ReadOnlyField()
-
-    class Meta:
-        model = Product
+        model = Department
         fields = [
-            "id", "title", "slug", "price", "compare_at_price",
-            "sku", "stock_quantity", "category", "category_name",
-            "status", "is_published", "is_on_sale",
-            "discount_percentage", "in_stock", "created_at",
+            "id", "name", "code", "head", "head_name",
+            "parent", "budget", "is_active", "employee_count",
+        ]
+
+    def get_head_name(self, obj):
+        if obj.head:
+            return obj.head.user.get_full_name()
+        return None
+
+
+class EmployeeListSerializer(serializers.ModelSerializer):
+    full_name = serializers.CharField(source="user.get_full_name", read_only=True)
+    email = serializers.EmailField(source="user.email", read_only=True)
+    department_name = serializers.CharField(source="department.name", read_only=True)
+
+    class Meta:
+        model = Employee
+        fields = [
+            "id", "employee_id", "full_name", "email", "department_name",
+            "role", "title", "is_active", "is_remote", "hire_date",
         ]
 
 
-class ProductDetailSerializer(serializers.ModelSerializer):
-    category = CategorySerializer(read_only=True)
-    category_id = serializers.PrimaryKeyRelatedField(
-        queryset=Category.objects.all(),
-        source="category",
-        write_only=True,
+class EmployeeDetailSerializer(serializers.ModelSerializer):
+    full_name = serializers.CharField(source="user.get_full_name", read_only=True)
+    email = serializers.EmailField(source="user.email", read_only=True)
+    department = DepartmentSerializer(read_only=True)
+    department_id = serializers.PrimaryKeyRelatedField(
+        queryset=Department.objects.filter(is_active=True),
+        source="department", write_only=True,
     )
-    tags = TagSerializer(many=True, read_only=True)
-    tag_ids = serializers.PrimaryKeyRelatedField(
-        queryset=Tag.objects.all(),
-        source="tags",
-        many=True,
-        write_only=True,
-        required=False,
-    )
-    is_on_sale = serializers.ReadOnlyField()
-    discount_percentage = serializers.ReadOnlyField()
-    in_stock = serializers.ReadOnlyField()
-    created_by_name = serializers.CharField(
-        source="created_by.get_full_name", read_only=True
-    )
+    manager_name = serializers.SerializerMethodField()
+    tenure_days = serializers.ReadOnlyField()
+    direct_report_count = serializers.ReadOnlyField()
 
     class Meta:
-        model = Product
+        model = Employee
         fields = [
-            "id", "title", "slug", "description", "price",
-            "compare_at_price", "sku", "stock_quantity",
-            "category", "category_id", "tags", "tag_ids",
-            "status", "is_published", "published_at",
-            "is_on_sale", "discount_percentage", "in_stock",
-            "created_by", "created_by_name",
+            "id", "employee_id", "full_name", "email",
+            "department", "department_id", "role", "title",
+            "salary", "hire_date", "manager", "manager_name",
+            "phone", "is_active", "is_remote", "notes",
+            "tenure_days", "direct_report_count",
             "created_at", "updated_at",
         ]
-        read_only_fields = ["created_by", "published_at"]
+        read_only_fields = ["employee_id", "created_at", "updated_at"]
 
-    def validate_sku(self, value):
-        qs = Product.objects.filter(sku=value)
-        if self.instance:
-            qs = qs.exclude(pk=self.instance.pk)
-        if qs.exists():
-            raise serializers.ValidationError("A product with this SKU already exists.")
+    def get_manager_name(self, obj):
+        if obj.manager:
+            return obj.manager.user.get_full_name()
+        return None
+
+    def validate_salary(self, value):
+        if value < 0:
+            raise serializers.ValidationError("Salary cannot be negative.")
         return value
 
+
+class LeaveRequestSerializer(serializers.ModelSerializer):
+    employee_name = serializers.CharField(
+        source="employee.user.get_full_name", read_only=True
+    )
+    duration_days = serializers.ReadOnlyField()
+    reviewer_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = LeaveRequest
+        fields = [
+            "id", "employee", "employee_name", "leave_type", "status",
+            "start_date", "end_date", "duration_days", "reason",
+            "reviewed_by", "reviewer_name", "reviewed_at", "created_at",
+        ]
+        read_only_fields = ["status", "reviewed_by", "reviewed_at"]
+
+    def get_reviewer_name(self, obj):
+        if obj.reviewed_by:
+            return obj.reviewed_by.user.get_full_name()
+        return None
+
     def validate(self, data):
-        price = data.get("price", getattr(self.instance, "price", None))
-        compare = data.get("compare_at_price", getattr(self.instance, "compare_at_price", None))
-        if compare is not None and compare <= price:
-            raise serializers.ValidationError({
-                "compare_at_price": "Compare-at price must be greater than the selling price."
-            })
+        if data["start_date"] > data["end_date"]:
+            raise serializers.ValidationError(
+                {"end_date": "End date must be after start date."}
+            )
+        if data["start_date"] < timezone.now().date():
+            raise serializers.ValidationError(
+                {"start_date": "Cannot request leave in the past."}
+            )
         return data
-
-    def create(self, validated_data):
-        tags = validated_data.pop("tags", [])
-        validated_data["created_by"] = self.context["request"].user
-        if not validated_data.get("slug"):
-            validated_data["slug"] = slugify(validated_data["title"])
-        product = Product.objects.create(**validated_data)
-        if tags:
-            product.tags.set(tags)
-        return product
-
-    def update(self, instance, validated_data):
-        tags = validated_data.pop("tags", None)
-        for attr, value in validated_data.items():
-            setattr(instance, attr, value)
-        instance.save()
-        if tags is not None:
-            instance.tags.set(tags)
-        return instance
 """,
     },
-    # ── Django: ViewSet with filters ──
+    # ── Django: ViewSets for HR ──
     {
         "filename": "views.py",
         "code": """\
-from rest_framework import viewsets, filters, status
+from rest_framework import viewsets, status, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated, IsAdminUser
+from rest_framework.permissions import IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
-from django.db.models import Q, Count, Avg
+from django.db.models import Count, Sum, Avg, Q
+from django.utils import timezone
 
-from products.models import Product, Category
-from products.serializers import (
-    ProductListSerializer,
-    ProductDetailSerializer,
-    CategorySerializer,
+from .models import Department, Employee, LeaveRequest
+from .serializers import (
+    DepartmentSerializer,
+    EmployeeListSerializer,
+    EmployeeDetailSerializer,
+    LeaveRequestSerializer,
 )
-from products.filters import ProductFilter
-from products.pagination import StandardPagination
+from .pagination import StandardPagination
 
 
-class ProductViewSet(viewsets.ModelViewSet):
+class DepartmentViewSet(viewsets.ModelViewSet):
+    queryset = Department.objects.all()
+    serializer_class = DepartmentSerializer
+    permission_classes = [IsAuthenticated]
+    filter_backends = [filters.SearchFilter, filters.OrderingFilter]
+    search_fields = ["name", "code"]
+    ordering_fields = ["name", "employee_count"]
+
+    @action(detail=True, methods=["get"])
+    def employees(self, request, pk=None):
+        department = self.get_object()
+        employees = Employee.objects.filter(
+            department=department, is_active=True
+        ).select_related("user", "manager")
+        serializer = EmployeeListSerializer(employees, many=True)
+        return Response(serializer.data)
+
+    @action(detail=False, methods=["get"])
+    def headcount_report(self, request):
+        departments = Department.objects.filter(is_active=True).annotate(
+            total_employees=Count("employees", filter=Q(employees__is_active=True)),
+            remote_count=Count(
+                "employees",
+                filter=Q(employees__is_active=True, employees__is_remote=True),
+            ),
+            avg_salary=Avg(
+                "employees__salary",
+                filter=Q(employees__is_active=True),
+            ),
+        ).order_by("-total_employees")
+
+        data = [
+            {
+                "department": d.name,
+                "code": d.code,
+                "headcount": d.total_employees,
+                "remote": d.remote_count,
+                "avg_salary": round(d.avg_salary or 0, 2),
+                "budget": float(d.budget),
+            }
+            for d in departments
+        ]
+        return Response(data)
+
+
+class EmployeeViewSet(viewsets.ModelViewSet):
+    queryset = Employee.objects.select_related(
+        "user", "department", "manager__user"
+    )
     permission_classes = [IsAuthenticated]
     pagination_class = StandardPagination
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
-    filterset_class = ProductFilter
-    search_fields = ["title", "sku", "description"]
-    ordering_fields = ["price", "created_at", "stock_quantity", "title"]
-    ordering = ["-created_at"]
-
-    def get_queryset(self):
-        qs = Product.objects.select_related("category", "created_by").prefetch_related("tags")
-        if not self.request.user.is_staff:
-            qs = qs.filter(is_published=True)
-        return qs
+    search_fields = ["user__first_name", "user__last_name", "employee_id"]
+    filterset_fields = ["department", "role", "is_active", "is_remote"]
+    ordering_fields = ["employee_id", "hire_date", "salary"]
+    ordering = ["employee_id"]
 
     def get_serializer_class(self):
         if self.action == "list":
-            return ProductListSerializer
-        return ProductDetailSerializer
+            return EmployeeListSerializer
+        return EmployeeDetailSerializer
 
-    @action(detail=True, methods=["post"], permission_classes=[IsAdminUser])
-    def publish(self, request, pk=None):
-        product = self.get_object()
-        if product.status == "published":
-            return Response(
-                {"detail": "Product is already published."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        product.publish()
-        serializer = self.get_serializer(product)
+    @action(detail=True, methods=["get"])
+    def direct_reports(self, request, pk=None):
+        employee = self.get_object()
+        reports = Employee.objects.filter(
+            manager=employee, is_active=True
+        ).select_related("user", "department")
+        serializer = EmployeeListSerializer(reports, many=True)
         return Response(serializer.data)
 
-    @action(detail=True, methods=["post"], permission_classes=[IsAdminUser])
-    def archive(self, request, pk=None):
-        product = self.get_object()
-        product.status = "archived"
-        product.is_published = False
-        product.save(update_fields=["status", "is_published", "updated_at"])
-        return Response({"detail": "Product archived."})
+    @action(detail=True, methods=["post"])
+    def deactivate(self, request, pk=None):
+        employee = self.get_object()
+        employee.is_active = False
+        employee.save(update_fields=["is_active", "updated_at"])
+        return Response({"status": "deactivated"})
 
     @action(detail=False, methods=["get"])
-    def stats(self, request):
-        qs = self.get_queryset()
-        data = {
-            "total": qs.count(),
-            "published": qs.filter(is_published=True).count(),
-            "draft": qs.filter(status="draft").count(),
-            "out_of_stock": qs.filter(stock_quantity=0).count(),
-            "avg_price": qs.aggregate(avg=Avg("price"))["avg"],
-            "by_category": list(
-                qs.values("category__name")
-                .annotate(count=Count("id"))
-                .order_by("-count")[:10]
-            ),
-        }
-        return Response(data)
+    def me(self, request):
+        try:
+            employee = Employee.objects.get(user=request.user)
+            serializer = EmployeeDetailSerializer(employee)
+            return Response(serializer.data)
+        except Employee.DoesNotExist:
+            return Response(
+                {"error": "No employee profile found"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+
+class LeaveRequestViewSet(viewsets.ModelViewSet):
+    serializer_class = LeaveRequestSerializer
+    permission_classes = [IsAuthenticated]
+    pagination_class = StandardPagination
+    filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
+    filterset_fields = ["leave_type", "status"]
+    ordering = ["-created_at"]
+
+    def get_queryset(self):
+        qs = LeaveRequest.objects.select_related(
+            "employee__user", "reviewed_by__user"
+        )
+        if self.request.user.is_staff:
+            return qs
+        return qs.filter(employee__user=self.request.user)
+
+    def perform_create(self, serializer):
+        employee = Employee.objects.get(user=self.request.user)
+        serializer.save(employee=employee)
 
     @action(detail=True, methods=["post"])
-    def adjust_stock(self, request, pk=None):
-        product = self.get_object()
-        delta = request.data.get("delta", 0)
+    def approve(self, request, pk=None):
+        leave = self.get_object()
+        if leave.status != "pending":
+            return Response(
+                {"error": "Can only approve pending requests"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        reviewer = Employee.objects.get(user=request.user)
+        leave.approve(reviewer)
+        return Response(LeaveRequestSerializer(leave).data)
+
+    @action(detail=True, methods=["post"])
+    def reject(self, request, pk=None):
+        leave = self.get_object()
+        if leave.status != "pending":
+            return Response(
+                {"error": "Can only reject pending requests"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        reviewer = Employee.objects.get(user=request.user)
+        leave.reject(reviewer)
+        return Response(LeaveRequestSerializer(leave).data)
+
+    @action(detail=False, methods=["get"])
+    def summary(self, request):
+        employee = Employee.objects.get(user=request.user)
+        year = timezone.now().year
+        leaves = LeaveRequest.objects.filter(
+            employee=employee,
+            start_date__year=year,
+            status="approved",
+        )
+        by_type = {}
+        for leave in leaves:
+            key = leave.leave_type
+            by_type[key] = by_type.get(key, 0) + leave.duration_days
+        return Response({
+            "year": year,
+            "used_by_type": by_type,
+            "total_used": sum(by_type.values()),
+        })
+""",
+    },
+    # ── Django: Celery tasks ──
+    {
+        "filename": "tasks.py",
+        "code": """\
+from celery import shared_task
+from django.db.models import Count, Q, Avg
+from django.utils import timezone
+from django.core.mail import send_mail
+from django.conf import settings
+from datetime import timedelta
+import logging
+import csv
+import io
+
+logger = logging.getLogger(__name__)
+
+
+@shared_task
+def send_leave_reminder_to_managers():
+    from .models import LeaveRequest, Employee
+
+    pending = LeaveRequest.objects.filter(
+        status="pending",
+        created_at__lte=timezone.now() - timedelta(days=2),
+    ).select_related("employee__user", "employee__manager__user")
+
+    manager_leaves = {}
+    for leave in pending:
+        mgr = leave.employee.manager
+        if mgr:
+            manager_leaves.setdefault(mgr, []).append(leave)
+
+    sent = 0
+    for manager, leaves in manager_leaves.items():
+        names = ", ".join(l.employee.user.get_full_name() for l in leaves)
+        send_mail(
+            subject=f"Pending leave requests need review ({len(leaves)})",
+            message=(
+                f"Hi {manager.user.first_name},\\n\\n"
+                f"You have {len(leaves)} pending leave request(s) "
+                f"from: {names}.\\n\\n"
+                f"Please log in to review them."
+            ),
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            recipient_list=[manager.user.email],
+            fail_silently=True,
+        )
+        sent += 1
+
+    logger.info(f"Sent leave reminders to {sent} managers")
+    return {"managers_notified": sent, "pending_leaves": pending.count()}
+
+
+@shared_task
+def generate_attendance_report(month=None, year=None):
+    from .models import Employee, LeaveRequest
+
+    now = timezone.now()
+    if not month:
+        month = now.month
+    if not year:
+        year = now.year
+
+    employees = Employee.objects.filter(is_active=True).select_related(
+        "user", "department"
+    )
+
+    report_rows = []
+    for emp in employees:
+        leaves = LeaveRequest.objects.filter(
+            employee=emp,
+            status="approved",
+            start_date__year=year,
+            start_date__month=month,
+        )
+        total_leave_days = sum(l.duration_days for l in leaves)
+        report_rows.append({
+            "employee_id": emp.employee_id,
+            "name": emp.user.get_full_name(),
+            "department": emp.department.name,
+            "leave_days": total_leave_days,
+            "working_days": 22 - total_leave_days,
+        })
+
+    logger.info(
+        f"Attendance report for {year}-{month:02d}: {len(report_rows)} employees"
+    )
+    return {
+        "period": f"{year}-{month:02d}",
+        "employee_count": len(report_rows),
+        "total_leave_days": sum(r["leave_days"] for r in report_rows),
+    }
+
+
+@shared_task
+def notify_upcoming_work_anniversaries(days_ahead=7):
+    from .models import Employee
+
+    today = timezone.now().date()
+    upcoming = []
+
+    for emp in Employee.objects.filter(is_active=True).select_related("user"):
+        anniversary = emp.hire_date.replace(year=today.year)
+        if anniversary < today:
+            anniversary = anniversary.replace(year=today.year + 1)
+        delta = (anniversary - today).days
+        if 0 <= delta <= days_ahead:
+            years = today.year - emp.hire_date.year
+            upcoming.append({
+                "employee": emp.user.get_full_name(),
+                "years": years,
+                "date": str(anniversary),
+            })
+
+    for item in upcoming:
+        logger.info(
+            f"Work anniversary: {item['employee']} - "
+            f"{item['years']} years on {item['date']}"
+        )
+
+    return {"upcoming_anniversaries": len(upcoming)}
+
+
+@shared_task(bind=True, max_retries=3, default_retry_delay=120)
+def sync_employee_directory(self):
+    from .models import Employee
+
+    try:
+        active = Employee.objects.filter(is_active=True).select_related(
+            "user", "department"
+        )
+        directory = []
+        for emp in active:
+            directory.append({
+                "id": emp.employee_id,
+                "name": emp.user.get_full_name(),
+                "email": emp.user.email,
+                "department": emp.department.name,
+                "title": emp.title,
+                "phone": emp.phone,
+                "is_remote": emp.is_remote,
+            })
+
+        logger.info(f"Employee directory synced: {len(directory)} entries")
+        return {"synced": len(directory)}
+
+    except Exception as exc:
+        logger.error(f"Directory sync failed: {exc}")
+        raise self.retry(exc=exc)
+""",
+    },
+    # ── Django: Signals ──
+    {
+        "filename": "signals.py",
+        "code": """\
+from django.db.models.signals import post_save, pre_save
+from django.dispatch import receiver
+from django.core.mail import send_mail
+from django.conf import settings
+import logging
+
+from .models import Employee, LeaveRequest
+
+logger = logging.getLogger(__name__)
+
+
+@receiver(post_save, sender=Employee)
+def handle_new_employee(sender, instance, created, **kwargs):
+    if created:
+        logger.info(
+            f"New employee: {instance.employee_id} - "
+            f"{instance.user.get_full_name()} in {instance.department.name}"
+        )
+        send_mail(
+            subject=f"Welcome to the team, {instance.user.first_name}!",
+            message=(
+                f"Hi {instance.user.first_name},\\n\\n"
+                f"Welcome aboard! Your employee ID is {instance.employee_id}.\\n"
+                f"Department: {instance.department.name}\\n"
+                f"Title: {instance.title}\\n\\n"
+                f"Please complete your onboarding checklist."
+            ),
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            recipient_list=[instance.user.email],
+            fail_silently=True,
+        )
+
+        if instance.manager:
+            send_mail(
+                subject=f"New team member: {instance.user.get_full_name()}",
+                message=(
+                    f"Hi {instance.manager.user.first_name},\\n\\n"
+                    f"{instance.user.get_full_name()} has joined your team "
+                    f"as {instance.title}.\\n"
+                ),
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                recipient_list=[instance.manager.user.email],
+                fail_silently=True,
+            )
+
+
+@receiver(pre_save, sender=LeaveRequest)
+def track_leave_status_change(sender, instance, **kwargs):
+    if instance.pk:
         try:
-            delta = int(delta)
-        except (TypeError, ValueError):
-            return Response(
-                {"detail": "delta must be an integer."},
-                status=status.HTTP_400_BAD_REQUEST,
+            old = LeaveRequest.objects.get(pk=instance.pk)
+            instance._old_status = old.status
+        except LeaveRequest.DoesNotExist:
+            instance._old_status = None
+    else:
+        instance._old_status = None
+
+
+@receiver(post_save, sender=LeaveRequest)
+def notify_leave_status(sender, instance, created, **kwargs):
+    if created:
+        if instance.employee.manager:
+            send_mail(
+                subject=f"Leave request from {instance.employee.user.get_full_name()}",
+                message=(
+                    f"{instance.employee.user.get_full_name()} has requested "
+                    f"{instance.get_leave_type_display()} from "
+                    f"{instance.start_date} to {instance.end_date} "
+                    f"({instance.duration_days} days).\\n\\n"
+                    f"Reason: {instance.reason or 'Not provided'}"
+                ),
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                recipient_list=[instance.employee.manager.user.email],
+                fail_silently=True,
             )
+        return
 
-        new_qty = product.stock_quantity + delta
-        if new_qty < 0:
-            return Response(
-                {"detail": "Stock cannot go below zero."},
-                status=status.HTTP_400_BAD_REQUEST,
+    old_status = getattr(instance, "_old_status", None)
+    if old_status and old_status != instance.status:
+        logger.info(
+            f"Leave {instance.pk}: {old_status} -> {instance.status}"
+        )
+        if instance.status in ("approved", "rejected"):
+            send_mail(
+                subject=f"Leave request {instance.status}",
+                message=(
+                    f"Your {instance.get_leave_type_display()} request "
+                    f"from {instance.start_date} to {instance.end_date} "
+                    f"has been {instance.status}."
+                ),
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                recipient_list=[instance.employee.user.email],
+                fail_silently=True,
             )
-
-        product.stock_quantity = new_qty
-        product.save(update_fields=["stock_quantity", "updated_at"])
-        return Response({"stock_quantity": product.stock_quantity})
-
-
-class CategoryViewSet(viewsets.ModelViewSet):
-    queryset = Category.objects.annotate(
-        product_count=Count("products", filter=Q(products__is_published=True))
-    ).select_related("parent")
-    serializer_class = CategorySerializer
-    permission_classes = [IsAuthenticated]
-    filter_backends = [filters.SearchFilter]
-    search_fields = ["name"]
-""",
-    },
-    # ── Django: URL configuration ──
-    {
-        "filename": "urls.py",
-        "code": """\
-from django.urls import path, include
-from rest_framework.routers import DefaultRouter
-
-from products.views import ProductViewSet, CategoryViewSet
-
-router = DefaultRouter()
-router.register(r"products", ProductViewSet, basename="product")
-router.register(r"categories", CategoryViewSet, basename="category")
-
-app_name = "products"
-
-urlpatterns = [
-    path("api/v1/", include(router.urls)),
-]
-""",
-    },
-    # ── Django: FilterSet ──
-    {
-        "filename": "filters.py",
-        "code": """\
-import django_filters
-from django.db.models import Q
-
-from products.models import Product
-
-
-class ProductFilter(django_filters.FilterSet):
-    min_price = django_filters.NumberFilter(field_name="price", lookup_expr="gte")
-    max_price = django_filters.NumberFilter(field_name="price", lookup_expr="lte")
-    category = django_filters.NumberFilter(field_name="category_id")
-    category_slug = django_filters.CharFilter(field_name="category__slug")
-    status = django_filters.ChoiceFilter(choices=Product.STATUS_CHOICES)
-    in_stock = django_filters.BooleanFilter(method="filter_in_stock")
-    on_sale = django_filters.BooleanFilter(method="filter_on_sale")
-    tag = django_filters.CharFilter(method="filter_by_tag")
-    created_after = django_filters.DateTimeFilter(field_name="created_at", lookup_expr="gte")
-    created_before = django_filters.DateTimeFilter(field_name="created_at", lookup_expr="lte")
-
-    class Meta:
-        model = Product
-        fields = [
-            "min_price", "max_price", "category", "category_slug",
-            "status", "in_stock", "on_sale", "tag",
-            "created_after", "created_before",
-        ]
-
-    def filter_in_stock(self, queryset, name, value):
-        if value:
-            return queryset.filter(stock_quantity__gt=0)
-        return queryset.filter(stock_quantity=0)
-
-    def filter_on_sale(self, queryset, name, value):
-        if value:
-            return queryset.filter(
-                compare_at_price__isnull=False,
-                compare_at_price__gt=models.F("price"),
-            )
-        return queryset
-
-    def filter_by_tag(self, queryset, name, value):
-        return queryset.filter(
-            Q(tags__slug=value) | Q(tags__name__iexact=value)
-        ).distinct()
-""",
-    },
-    # ── Django: Custom pagination ──
-    {
-        "filename": "pagination.py",
-        "code": """\
-from rest_framework.pagination import PageNumberPagination
-from rest_framework.response import Response
-from collections import OrderedDict
-
-
-class StandardPagination(PageNumberPagination):
-    page_size = 20
-    page_size_query_param = "page_size"
-    max_page_size = 100
-
-    def get_paginated_response(self, data):
-        return Response(OrderedDict([
-            ("count", self.page.paginator.count),
-            ("page", self.page.number),
-            ("page_size", self.get_page_size(self.request)),
-            ("total_pages", self.page.paginator.num_pages),
-            ("next", self.get_next_link()),
-            ("previous", self.get_previous_link()),
-            ("results", data),
-        ]))
-
-    def get_paginated_response_schema(self, schema):
-        return {
-            "type": "object",
-            "properties": {
-                "count": {"type": "integer"},
-                "page": {"type": "integer"},
-                "page_size": {"type": "integer"},
-                "total_pages": {"type": "integer"},
-                "next": {"type": "string", "nullable": True},
-                "previous": {"type": "string", "nullable": True},
-                "results": schema,
-            },
-        }
 """,
     },
     # ── Django: Admin configuration ──
@@ -1106,1338 +1323,480 @@ class StandardPagination(PageNumberPagination):
 from django.contrib import admin
 from django.utils.html import format_html
 
-from products.models import Product, Category, Tag
+from .models import Department, Employee, LeaveRequest
 
 
-class ProductInline(admin.TabularInline):
-    model = Product
-    extra = 0
-    fields = ["title", "sku", "price", "stock_quantity", "status"]
-    readonly_fields = ["title", "sku"]
-    show_change_link = True
+@admin.register(Department)
+class DepartmentAdmin(admin.ModelAdmin):
+    list_display = ["name", "code", "head_display", "headcount", "budget_display", "is_active"]
+    list_filter = ["is_active"]
+    search_fields = ["name", "code"]
+    list_editable = ["is_active"]
+
+    def head_display(self, obj):
+        if obj.head:
+            return obj.head.user.get_full_name()
+        return "-"
+    head_display.short_description = "Department Head"
+
+    def headcount(self, obj):
+        count = obj.employees.filter(is_active=True).count()
+        color = "#e53e3e" if count == 0 else "#38a169"
+        return format_html('<span style="color:{}">{}</span>', color, count)
+    headcount.short_description = "Employees"
+
+    def budget_display(self, obj):
+        return f"${obj.budget:,.2f}"
+    budget_display.short_description = "Budget"
 
 
-@admin.register(Category)
-class CategoryAdmin(admin.ModelAdmin):
-    list_display = ["name", "slug", "parent", "sort_order", "product_count"]
-    list_editable = ["sort_order"]
-    prepopulated_fields = {"slug": ("name",)}
-    search_fields = ["name"]
-    list_filter = ["parent"]
-    inlines = [ProductInline]
-
-    def product_count(self, obj):
-        return obj.products.count()
-    product_count.short_description = "Products"
-
-
-@admin.register(Product)
-class ProductAdmin(admin.ModelAdmin):
+@admin.register(Employee)
+class EmployeeAdmin(admin.ModelAdmin):
     list_display = [
-        "title", "sku", "price_display", "stock_quantity",
-        "category", "status", "is_published", "created_at",
+        "employee_id", "full_name", "email", "department",
+        "role", "title", "status_badge", "hire_date",
     ]
-    list_filter = ["status", "is_published", "category", "created_at"]
-    search_fields = ["title", "sku", "description"]
-    prepopulated_fields = {"slug": ("title",)}
-    readonly_fields = ["created_at", "updated_at", "created_by"]
-    filter_horizontal = ["tags"]
-    list_per_page = 25
-    date_hierarchy = "created_at"
-    actions = ["publish_selected", "archive_selected"]
+    list_filter = ["department", "role", "is_active", "is_remote", "hire_date"]
+    search_fields = [
+        "employee_id", "user__first_name", "user__last_name", "user__email"
+    ]
+    readonly_fields = ["employee_id", "created_at", "updated_at"]
+    list_per_page = 50
+    date_hierarchy = "hire_date"
 
     fieldsets = (
-        (None, {
-            "fields": ("title", "slug", "description"),
+        ("Personal", {
+            "fields": ("user", "employee_id", "phone"),
         }),
-        ("Pricing & Inventory", {
-            "fields": ("price", "compare_at_price", "sku", "stock_quantity"),
+        ("Position", {
+            "fields": ("department", "role", "title", "manager", "salary"),
         }),
-        ("Classification", {
-            "fields": ("category", "tags", "status", "is_published"),
+        ("Status", {
+            "fields": ("is_active", "is_remote", "hire_date"),
         }),
-        ("Metadata", {
+        ("Notes", {
+            "fields": ("notes",),
             "classes": ("collapse",),
-            "fields": ("created_by", "created_at", "updated_at"),
         }),
     )
 
-    def price_display(self, obj):
-        if obj.is_on_sale:
+    def full_name(self, obj):
+        return obj.user.get_full_name()
+
+    def email(self, obj):
+        return obj.user.email
+
+    def status_badge(self, obj):
+        if not obj.is_active:
             return format_html(
-                '<span style="text-decoration:line-through;color:#999">${}</span> '
-                '<span style="color:#e53e3e;font-weight:bold">${}</span>',
-                obj.compare_at_price, obj.price,
+                '<span style="color:#e53e3e;font-weight:bold">Inactive</span>'
             )
-        return f"${obj.price}"
-    price_display.short_description = "Price"
-
-    def save_model(self, request, obj, form, change):
-        if not change:
-            obj.created_by = request.user
-        super().save_model(request, obj, form, change)
-
-    @admin.action(description="Publish selected products")
-    def publish_selected(self, request, queryset):
-        count = 0
-        for product in queryset.filter(status__in=["draft", "review"]):
-            product.publish()
-            count += 1
-        self.message_user(request, f"{count} product(s) published.")
-
-    @admin.action(description="Archive selected products")
-    def archive_selected(self, request, queryset):
-        count = queryset.update(status="archived", is_published=False)
-        self.message_user(request, f"{count} product(s) archived.")
-
-
-@admin.register(Tag)
-class TagAdmin(admin.ModelAdmin):
-    list_display = ["name", "slug", "product_count"]
-    prepopulated_fields = {"slug": ("name",)}
-    search_fields = ["name"]
-
-    def product_count(self, obj):
-        return obj.products.count()
-    product_count.short_description = "Products"
-""",
-    },
-    # ── Django: Management command ──
-    {
-        "filename": "import_products.py",
-        "code": """\
-import csv
-import sys
-from decimal import Decimal, InvalidOperation
-from pathlib import Path
-
-from django.core.management.base import BaseCommand, CommandError
-from django.db import transaction
-from django.utils.text import slugify
-
-from products.models import Product, Category, Tag
-
-
-class Command(BaseCommand):
-    help = "Import products from a CSV file"
-
-    def add_arguments(self, parser):
-        parser.add_argument("csv_file", type=str, help="Path to CSV file")
-        parser.add_argument(
-            "--dry-run", action="store_true",
-            help="Validate without saving to database",
-        )
-        parser.add_argument(
-            "--update-existing", action="store_true",
-            help="Update products that already exist (matched by SKU)",
-        )
-
-    def handle(self, *args, **options):
-        csv_path = Path(options["csv_file"])
-        if not csv_path.exists():
-            raise CommandError(f"File not found: {csv_path}")
-
-        dry_run = options["dry_run"]
-        update_existing = options["update_existing"]
-        created_count = 0
-        updated_count = 0
-        skipped_count = 0
-        errors = []
-
-        with open(csv_path, newline="", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            required_fields = {"title", "sku", "price", "category"}
-            if not required_fields.issubset(set(reader.fieldnames or [])):
-                missing = required_fields - set(reader.fieldnames or [])
-                raise CommandError(f"Missing required columns: {', '.join(missing)}")
-
-            rows = list(reader)
-
-        self.stdout.write(f"Found {len(rows)} rows to process...")
-
-        with transaction.atomic():
-            for i, row in enumerate(rows, start=2):
-                try:
-                    sku = row["sku"].strip()
-                    if not sku:
-                        errors.append(f"Row {i}: empty SKU")
-                        continue
-
-                    price = Decimal(row["price"].strip())
-                    if price <= 0:
-                        errors.append(f"Row {i}: invalid price {row['price']}")
-                        continue
-
-                    category, _ = Category.objects.get_or_create(
-                        slug=slugify(row["category"].strip()),
-                        defaults={"name": row["category"].strip()},
-                    )
-
-                    existing = Product.objects.filter(sku=sku).first()
-                    if existing:
-                        if update_existing:
-                            existing.title = row["title"].strip()
-                            existing.price = price
-                            existing.category = category
-                            existing.description = row.get("description", "").strip()
-                            stock = row.get("stock_quantity", "").strip()
-                            if stock:
-                                existing.stock_quantity = int(stock)
-                            if not dry_run:
-                                existing.save()
-                            updated_count += 1
-                        else:
-                            skipped_count += 1
-                        continue
-
-                    product = Product(
-                        title=row["title"].strip(),
-                        slug=slugify(row["title"].strip()),
-                        sku=sku,
-                        price=price,
-                        category=category,
-                        description=row.get("description", "").strip(),
-                        stock_quantity=int(row.get("stock_quantity", 0) or 0),
-                        status="draft",
-                    )
-                    if not dry_run:
-                        product.save()
-
-                    tag_str = row.get("tags", "").strip()
-                    if tag_str and not dry_run:
-                        for tag_name in tag_str.split(","):
-                            tag_name = tag_name.strip()
-                            if tag_name:
-                                tag, _ = Tag.objects.get_or_create(
-                                    slug=slugify(tag_name),
-                                    defaults={"name": tag_name},
-                                )
-                                product.tags.add(tag)
-
-                    created_count += 1
-                except (InvalidOperation, ValueError) as e:
-                    errors.append(f"Row {i}: {e}")
-
-            if dry_run:
-                transaction.set_rollback(True)
-                self.stdout.write(self.style.WARNING("DRY RUN — no changes saved"))
-
-        self.stdout.write(self.style.SUCCESS(
-            f"Created: {created_count}, Updated: {updated_count}, Skipped: {skipped_count}"
-        ))
-        if errors:
-            self.stdout.write(self.style.ERROR(f"Errors ({len(errors)}):"))
-            for err in errors:
-                self.stdout.write(f"  {err}")
-""",
-    },
-    # ── Django: Tests ──
-    {
-        "filename": "test_products.py",
-        "code": """\
-import pytest
-from decimal import Decimal
-from django.urls import reverse
-from rest_framework import status
-from rest_framework.test import APIClient
-
-from products.models import Product, Category, Tag
-
-
-@pytest.fixture
-def api_client(db, django_user_model):
-    user = django_user_model.objects.create_user(
-        username="testuser", password="testpass123"
-    )
-    client = APIClient()
-    client.force_authenticate(user=user)
-    return client, user
-
-
-@pytest.fixture
-def category(db):
-    return Category.objects.create(name="Electronics", slug="electronics")
-
-
-@pytest.fixture
-def sample_product(db, category):
-    return Product.objects.create(
-        title="Wireless Keyboard",
-        slug="wireless-keyboard",
-        sku="KB-001",
-        price=Decimal("79.99"),
-        stock_quantity=50,
-        category=category,
-        status="published",
-        is_published=True,
-    )
-
-
-class TestProductModel:
-    def test_str_representation(self, sample_product):
-        assert str(sample_product) == "Wireless Keyboard"
-
-    def test_in_stock_property(self, sample_product):
-        assert sample_product.in_stock is True
-        sample_product.stock_quantity = 0
-        assert sample_product.in_stock is False
-
-    def test_not_on_sale_without_compare_price(self, sample_product):
-        assert sample_product.is_on_sale is False
-        assert sample_product.discount_percentage == 0
-
-    def test_on_sale_with_compare_price(self, sample_product):
-        sample_product.compare_at_price = Decimal("99.99")
-        assert sample_product.is_on_sale is True
-        assert sample_product.discount_percentage == 20
-
-    def test_publish_sets_fields(self, sample_product):
-        sample_product.status = "draft"
-        sample_product.is_published = False
-        sample_product.published_at = None
-        sample_product.publish()
-        sample_product.refresh_from_db()
-        assert sample_product.status == "published"
-        assert sample_product.is_published is True
-        assert sample_product.published_at is not None
-
-
-class TestProductAPI:
-    def test_list_products(self, api_client, sample_product):
-        client, _ = api_client
-        url = reverse("product-list")
-        response = client.get(url)
-        assert response.status_code == status.HTTP_200_OK
-        assert response.data["count"] >= 1
-
-    def test_create_product(self, api_client, category):
-        client, _ = api_client
-        url = reverse("product-list")
-        data = {
-            "title": "USB-C Hub",
-            "sku": "HUB-001",
-            "price": "49.99",
-            "category_id": category.id,
-            "stock_quantity": 100,
-        }
-        response = client.post(url, data, format="json")
-        assert response.status_code == status.HTTP_201_CREATED
-        assert Product.objects.filter(sku="HUB-001").exists()
-
-    def test_create_duplicate_sku_fails(self, api_client, sample_product, category):
-        client, _ = api_client
-        url = reverse("product-list")
-        data = {
-            "title": "Another Product",
-            "sku": "KB-001",
-            "price": "29.99",
-            "category_id": category.id,
-        }
-        response = client.post(url, data, format="json")
-        assert response.status_code == status.HTTP_400_BAD_REQUEST
-
-    def test_filter_by_category(self, api_client, sample_product, category):
-        client, _ = api_client
-        url = reverse("product-list")
-        response = client.get(url, {"category": category.id})
-        assert response.status_code == status.HTTP_200_OK
-        for item in response.data["results"]:
-            assert item["category"] == category.id
-
-    def test_search_products(self, api_client, sample_product):
-        client, _ = api_client
-        url = reverse("product-list")
-        response = client.get(url, {"search": "wireless"})
-        assert response.status_code == status.HTTP_200_OK
-        assert response.data["count"] >= 1
-
-    def test_adjust_stock(self, api_client, sample_product):
-        client, _ = api_client
-        url = reverse("product-adjust-stock", args=[sample_product.pk])
-        response = client.post(url, {"delta": -10}, format="json")
-        assert response.status_code == status.HTTP_200_OK
-        assert response.data["stock_quantity"] == 40
-
-    def test_adjust_stock_below_zero_fails(self, api_client, sample_product):
-        client, _ = api_client
-        url = reverse("product-adjust-stock", args=[sample_product.pk])
-        response = client.post(url, {"delta": -999}, format="json")
-        assert response.status_code == status.HTTP_400_BAD_REQUEST
-""",
-    },
-    # ── FastAPI: Main app with middleware ──
-    {
-        "filename": "main.py",
-        "code": """\
-from contextlib import asynccontextmanager
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.middleware.trustedhost import TrustedHostMiddleware
-import logging
-import time
-
-from app.config import settings
-from app.database import engine, Base
-from app.routers import products, categories, auth, health
-
-logger = logging.getLogger(__name__)
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    logger.info("Starting up — creating database tables")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    yield
-    logger.info("Shutting down — disposing engine")
-    await engine.dispose()
-
-
-app = FastAPI(
-    title=settings.PROJECT_NAME,
-    version="1.0.0",
-    docs_url="/api/docs",
-    openapi_url="/api/openapi.json",
-    lifespan=lifespan,
-)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=settings.ALLOWED_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-app.add_middleware(
-    TrustedHostMiddleware,
-    allowed_hosts=settings.ALLOWED_HOSTS,
-)
-
-
-@app.middleware("http")
-async def add_timing_header(request, call_next):
-    start = time.perf_counter()
-    response = await call_next(request)
-    elapsed = time.perf_counter() - start
-    response.headers["X-Process-Time"] = f"{elapsed:.4f}"
-    return response
-
-
-app.include_router(health.router, prefix="/api", tags=["health"])
-app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
-app.include_router(products.router, prefix="/api/v1", tags=["products"])
-app.include_router(categories.router, prefix="/api/v1", tags=["categories"])
-""",
-    },
-    # ── FastAPI: Database & models ──
-    {
-        "filename": "database.py",
-        "code": """\
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-from sqlalchemy import String, Integer, Boolean, DateTime, ForeignKey, Numeric, Text
-from datetime import datetime
-from typing import Optional
-
-from app.config import settings
-
-engine = create_async_engine(settings.DATABASE_URL, echo=settings.DEBUG, pool_size=20)
-async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-
-
-class Base(DeclarativeBase):
-    pass
-
-
-class TimestampMixin:
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
-    )
-
-
-class Category(TimestampMixin, Base):
-    __tablename__ = "categories"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    name: Mapped[str] = mapped_column(String(120), nullable=False)
-    slug: Mapped[str] = mapped_column(String(120), unique=True, nullable=False)
-    parent_id: Mapped[Optional[int]] = mapped_column(
-        Integer, ForeignKey("categories.id"), nullable=True
-    )
-    sort_order: Mapped[int] = mapped_column(Integer, default=0)
-
-
-class Product(TimestampMixin, Base):
-    __tablename__ = "products"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    title: Mapped[str] = mapped_column(String(255), nullable=False)
-    slug: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
-    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    price: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False)
-    compare_at_price: Mapped[Optional[float]] = mapped_column(Numeric(10, 2), nullable=True)
-    sku: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)
-    stock_quantity: Mapped[int] = mapped_column(Integer, default=0)
-    category_id: Mapped[int] = mapped_column(Integer, ForeignKey("categories.id"), nullable=False)
-    status: Mapped[str] = mapped_column(String(20), default="draft")
-    is_published: Mapped[bool] = mapped_column(Boolean, default=False)
-
-
-class User(TimestampMixin, Base):
-    __tablename__ = "users"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
-    name: Mapped[str] = mapped_column(String(255), nullable=False)
-    hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
-    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
-
-
-async def get_db():
-    async with async_session() as session:
-        try:
-            yield session
-            await session.commit()
-        except Exception:
-            await session.rollback()
-            raise
-""",
-    },
-    # ── FastAPI: Product routes ──
-    {
-        "filename": "products_router.py",
-        "code": """\
-from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, and_
-from typing import Optional
-
-from app.database import get_db, Product, Category
-from app.schemas import (
-    ProductCreate,
-    ProductUpdate,
-    ProductResponse,
-    ProductListResponse,
-)
-from app.auth import get_current_user, require_admin
-
-router = APIRouter()
-
-
-@router.get("/products", response_model=ProductListResponse)
-async def list_products(
-    page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=100),
-    category_id: Optional[int] = None,
-    status: Optional[str] = None,
-    search: Optional[str] = None,
-    min_price: Optional[float] = None,
-    max_price: Optional[float] = None,
-    in_stock: Optional[bool] = None,
-    sort_by: str = Query("created_at", regex="^(title|price|created_at|stock_quantity)$"),
-    sort_dir: str = Query("desc", regex="^(asc|desc)$"),
-    db: AsyncSession = Depends(get_db),
-    user=Depends(get_current_user),
-):
-    query = select(Product)
-
-    if not user.is_admin:
-        query = query.where(Product.is_published == True)
-
-    if category_id:
-        query = query.where(Product.category_id == category_id)
-    if status:
-        query = query.where(Product.status == status)
-    if search:
-        query = query.where(
-            Product.title.ilike(f"%{search}%")
-            | Product.sku.ilike(f"%{search}%")
-        )
-    if min_price is not None:
-        query = query.where(Product.price >= min_price)
-    if max_price is not None:
-        query = query.where(Product.price <= max_price)
-    if in_stock is True:
-        query = query.where(Product.stock_quantity > 0)
-    elif in_stock is False:
-        query = query.where(Product.stock_quantity == 0)
-
-    count_query = select(func.count()).select_from(query.subquery())
-    total = (await db.execute(count_query)).scalar()
-
-    sort_column = getattr(Product, sort_by)
-    if sort_dir == "desc":
-        sort_column = sort_column.desc()
-    query = query.order_by(sort_column).offset((page - 1) * page_size).limit(page_size)
-
-    result = await db.execute(query)
-    products = result.scalars().all()
-
-    return {
-        "results": products,
-        "count": total,
-        "page": page,
-        "page_size": page_size,
-        "total_pages": (total + page_size - 1) // page_size,
-    }
-
-
-@router.get("/products/{product_id}", response_model=ProductResponse)
-async def get_product(
-    product_id: int,
-    db: AsyncSession = Depends(get_db),
-    user=Depends(get_current_user),
-):
-    result = await db.execute(select(Product).where(Product.id == product_id))
-    product = result.scalar_one_or_none()
-    if not product:
-        raise HTTPException(status_code=404, detail="Product not found")
-    if not product.is_published and not user.is_admin:
-        raise HTTPException(status_code=404, detail="Product not found")
-    return product
-
-
-@router.post("/products", response_model=ProductResponse, status_code=201)
-async def create_product(
-    payload: ProductCreate,
-    db: AsyncSession = Depends(get_db),
-    user=Depends(require_admin),
-):
-    existing = await db.execute(select(Product).where(Product.sku == payload.sku))
-    if existing.scalar_one_or_none():
-        raise HTTPException(status_code=409, detail="SKU already exists")
-
-    cat = await db.execute(select(Category).where(Category.id == payload.category_id))
-    if not cat.scalar_one_or_none():
-        raise HTTPException(status_code=400, detail="Invalid category")
-
-    product = Product(**payload.model_dump())
-    db.add(product)
-    await db.flush()
-    await db.refresh(product)
-    return product
-
-
-@router.patch("/products/{product_id}", response_model=ProductResponse)
-async def update_product(
-    product_id: int,
-    payload: ProductUpdate,
-    db: AsyncSession = Depends(get_db),
-    user=Depends(require_admin),
-):
-    result = await db.execute(select(Product).where(Product.id == product_id))
-    product = result.scalar_one_or_none()
-    if not product:
-        raise HTTPException(status_code=404, detail="Product not found")
-
-    update_data = payload.model_dump(exclude_unset=True)
-    for field, value in update_data.items():
-        setattr(product, field, value)
-
-    await db.flush()
-    await db.refresh(product)
-    return product
-
-
-@router.delete("/products/{product_id}", status_code=204)
-async def delete_product(
-    product_id: int,
-    db: AsyncSession = Depends(get_db),
-    user=Depends(require_admin),
-):
-    result = await db.execute(select(Product).where(Product.id == product_id))
-    product = result.scalar_one_or_none()
-    if not product:
-        raise HTTPException(status_code=404, detail="Product not found")
-    await db.delete(product)
-""",
-    },
-    # ── FastAPI: Pydantic schemas ──
-    {
-        "filename": "schemas.py",
-        "code": """\
-from pydantic import BaseModel, Field, field_validator, model_validator
-from typing import Optional
-from datetime import datetime
-
-
-class CategoryBase(BaseModel):
-    name: str = Field(..., min_length=1, max_length=120)
-    slug: str = Field(..., min_length=1, max_length=120)
-    parent_id: Optional[int] = None
-    sort_order: int = 0
-
-
-class CategoryCreate(CategoryBase):
-    pass
-
-
-class CategoryResponse(CategoryBase):
-    id: int
-    created_at: datetime
-    updated_at: datetime
-
-    model_config = {"from_attributes": True}
-
-
-class ProductBase(BaseModel):
-    title: str = Field(..., min_length=1, max_length=255)
-    slug: Optional[str] = None
-    description: Optional[str] = None
-    price: float = Field(..., gt=0)
-    compare_at_price: Optional[float] = None
-    sku: str = Field(..., min_length=1, max_length=50)
-    stock_quantity: int = Field(default=0, ge=0)
-    category_id: int
-
-    @field_validator("sku")
-    @classmethod
-    def sku_must_be_uppercase(cls, v: str) -> str:
-        return v.upper().strip()
-
-    @model_validator(mode="after")
-    def check_compare_price(self):
-        if self.compare_at_price is not None and self.compare_at_price <= self.price:
-            raise ValueError("compare_at_price must be greater than price")
-        return self
-
-
-class ProductCreate(ProductBase):
-    status: str = Field(default="draft", pattern="^(draft|review|published)$")
-
-
-class ProductUpdate(BaseModel):
-    title: Optional[str] = Field(None, min_length=1, max_length=255)
-    description: Optional[str] = None
-    price: Optional[float] = Field(None, gt=0)
-    compare_at_price: Optional[float] = None
-    sku: Optional[str] = Field(None, min_length=1, max_length=50)
-    stock_quantity: Optional[int] = Field(None, ge=0)
-    category_id: Optional[int] = None
-    status: Optional[str] = Field(None, pattern="^(draft|review|published|archived)$")
-    is_published: Optional[bool] = None
-
-
-class ProductResponse(ProductBase):
-    id: int
-    status: str
-    is_published: bool
-    created_at: datetime
-    updated_at: datetime
-
-    model_config = {"from_attributes": True}
-
-    @property
-    def is_on_sale(self) -> bool:
-        return (
-            self.compare_at_price is not None
-            and self.compare_at_price > self.price
-        )
-
-    @property
-    def discount_percentage(self) -> int:
-        if not self.is_on_sale:
-            return 0
-        diff = self.compare_at_price - self.price
-        return int((diff / self.compare_at_price) * 100)
-
-
-class ProductListResponse(BaseModel):
-    results: list[ProductResponse]
-    count: int
-    page: int
-    page_size: int
-    total_pages: int
-""",
-    },
-    # ── FastAPI: Auth with JWT ──
-    {
-        "filename": "auth.py",
-        "code": """\
-from datetime import datetime, timedelta
-from typing import Optional
-
-from fastapi import Depends, HTTPException, status
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from jose import JWTError, jwt
-from passlib.context import CryptContext
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from app.config import settings
-from app.database import get_db, User
-
-security = HTTPBearer()
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24
-
-
-def hash_password(password: str) -> str:
-    return pwd_context.hash(password)
-
-
-def verify_password(plain: str, hashed: str) -> bool:
-    return pwd_context.verify(plain, hashed)
-
-
-def create_access_token(user_id: int, email: str, is_admin: bool) -> str:
-    expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    payload = {
-        "sub": str(user_id),
-        "email": email,
-        "is_admin": is_admin,
-        "exp": expire,
-    }
-    return jwt.encode(payload, settings.SECRET_KEY, algorithm=ALGORITHM)
-
-
-def decode_token(token: str) -> dict:
-    try:
-        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[ALGORITHM])
-        return payload
-    except JWTError:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired token",
-        )
-
-
-async def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(security),
-    db: AsyncSession = Depends(get_db),
-) -> User:
-    payload = decode_token(credentials.credentials)
-    user_id = int(payload["sub"])
-
-    result = await db.execute(select(User).where(User.id == user_id))
-    user = result.scalar_one_or_none()
-
-    if not user or not user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User not found or inactive",
-        )
-    return user
-
-
-async def require_admin(user: User = Depends(get_current_user)) -> User:
-    if not user.is_admin:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Admin access required",
-        )
-    return user
-""",
-    },
-    # ── FastAPI: Config with Pydantic settings ──
-    {
-        "filename": "config.py",
-        "code": """\
-from pydantic_settings import BaseSettings
-from functools import lru_cache
-from typing import Optional
-
-
-class Settings(BaseSettings):
-    PROJECT_NAME: str = "Product Catalog API"
-    DEBUG: bool = False
-    VERSION: str = "1.0.0"
-
-    DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/catalog"
-    REDIS_URL: str = "redis://localhost:6379/0"
-
-    SECRET_KEY: str = "change-me-in-production"
-    ALLOWED_ORIGINS: list[str] = ["http://localhost:3000", "http://localhost:5173"]
-    ALLOWED_HOSTS: list[str] = ["localhost", "127.0.0.1"]
-
-    SMTP_HOST: Optional[str] = None
-    SMTP_PORT: int = 587
-    SMTP_USER: Optional[str] = None
-    SMTP_PASSWORD: Optional[str] = None
-    FROM_EMAIL: str = "noreply@example.com"
-
-    S3_BUCKET: Optional[str] = None
-    S3_REGION: str = "us-east-1"
-    AWS_ACCESS_KEY_ID: Optional[str] = None
-    AWS_SECRET_ACCESS_KEY: Optional[str] = None
-
-    LOG_LEVEL: str = "INFO"
-
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
-
-
-@lru_cache()
-def get_settings() -> Settings:
-    return Settings()
-
-
-settings = get_settings()
-""",
-    },
-    # ── Django: Celery tasks ──
-    {
-        "filename": "tasks.py",
-        "code": """\
-import logging
-from datetime import timedelta
-
-from celery import shared_task
-from django.utils import timezone
-from django.core.mail import send_mail
-from django.conf import settings
-from django.db.models import F, Q
-
-from products.models import Product, Category
-
-logger = logging.getLogger(__name__)
-
-
-@shared_task(bind=True, max_retries=3, default_retry_delay=60)
-def check_low_stock(self, threshold=10):
-    low_stock = Product.objects.filter(
-        is_published=True,
-        stock_quantity__lte=threshold,
-        stock_quantity__gt=0,
-    ).select_related("category")
-
-    count = low_stock.count()
-    if count == 0:
-        logger.info("No low-stock products found")
-        return {"checked": True, "low_stock_count": 0}
-
-    product_lines = []
-    for p in low_stock[:50]:
-        product_lines.append(
-            f"  - {p.title} (SKU: {p.sku}) — {p.stock_quantity} remaining"
-        )
-
-    body = f"The following {count} product(s) are running low on stock:\\n\\n"
-    body += "\\n".join(product_lines)
-    if count > 50:
-        body += f"\\n  ... and {count - 50} more"
-
-    try:
-        send_mail(
-            subject=f"[Catalog] {count} product(s) low on stock",
-            message=body,
-            from_email=settings.DEFAULT_FROM_EMAIL,
-            recipient_list=[settings.STOCK_ALERT_EMAIL],
-            fail_silently=False,
-        )
-    except Exception as exc:
-        logger.error("Failed to send low-stock email: %s", exc)
-        raise self.retry(exc=exc)
-
-    return {"checked": True, "low_stock_count": count}
-
-
-@shared_task
-def sync_category_counts():
-    categories = Category.objects.all()
-    updated = 0
-    for cat in categories:
-        count = cat.products.filter(is_published=True).count()
-        if hasattr(cat, "cached_product_count") and cat.cached_product_count != count:
-            cat.cached_product_count = count
-            cat.save(update_fields=["cached_product_count"])
-            updated += 1
-    logger.info("Updated %d category counts", updated)
-    return {"updated": updated}
-
-
-@shared_task
-def archive_stale_drafts(days=90):
-    cutoff = timezone.now() - timedelta(days=days)
-    stale = Product.objects.filter(
-        status="draft",
-        updated_at__lt=cutoff,
-    )
-    count = stale.update(status="archived")
-    logger.info("Archived %d stale draft products older than %d days", count, days)
-    return {"archived": count}
-
-
-@shared_task(bind=True, max_retries=2)
-def generate_price_report(self, category_id=None):
-    from django.db.models import Avg, Min, Max, Count
-
-    qs = Product.objects.filter(is_published=True)
-    if category_id:
-        qs = qs.filter(category_id=category_id)
-
-    stats = qs.aggregate(
-        total=Count("id"),
-        avg_price=Avg("price"),
-        min_price=Min("price"),
-        max_price=Max("price"),
-    )
-
-    by_category = (
-        qs.values("category__name")
-        .annotate(
-            count=Count("id"),
-            avg_price=Avg("price"),
-        )
-        .order_by("-count")
-    )
-
-    report = {
-        "generated_at": timezone.now().isoformat(),
-        "overall": stats,
-        "by_category": list(by_category),
-    }
-
-    logger.info("Price report generated: %d products", stats["total"])
-    return report
-""",
-    },
-    # ── FastAPI: Tests ──
-    {
-        "filename": "test_api.py",
-        "code": """\
-import pytest
-from httpx import AsyncClient, ASGITransport
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
-
-from app.main import app
-from app.database import Base, get_db
-from app.auth import hash_password
-
-TEST_DB_URL = "sqlite+aiosqlite:///./test.db"
-engine = create_async_engine(TEST_DB_URL, echo=False)
-TestSession = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-
-
-@pytest.fixture(autouse=True)
-async def setup_db():
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    yield
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
-
-
-async def override_get_db():
-    async with TestSession() as session:
-        yield session
-        await session.commit()
-
-
-app.dependency_overrides[get_db] = override_get_db
-
-
-@pytest.fixture
-async def client():
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        yield ac
-
-
-@pytest.fixture
-async def auth_headers(client):
-    from app.database import User
-    async with TestSession() as db:
-        user = User(
-            email="admin@test.com",
-            name="Admin User",
-            hashed_password=hash_password("password123"),
-            is_active=True,
-            is_admin=True,
-        )
-        db.add(user)
-        await db.commit()
-        await db.refresh(user)
-
-    response = await client.post("/api/auth/login", json={
-        "email": "admin@test.com",
-        "password": "password123",
-    })
-    token = response.json()["access_token"]
-    return {"Authorization": f"Bearer {token}"}
-
-
-@pytest.fixture
-async def sample_category(auth_headers):
-    async with TestSession() as db:
-        from app.database import Category
-        cat = Category(name="Electronics", slug="electronics")
-        db.add(cat)
-        await db.commit()
-        await db.refresh(cat)
-        return cat
-
-
-@pytest.mark.asyncio
-class TestHealthCheck:
-    async def test_health(self, client):
-        response = await client.get("/api/health")
-        assert response.status_code == 200
-        assert response.json()["status"] == "ok"
-
-
-@pytest.mark.asyncio
-class TestProducts:
-    async def test_create_product(self, client, auth_headers, sample_category):
-        response = await client.post(
-            "/api/v1/products",
-            headers=auth_headers,
-            json={
-                "title": "Wireless Mouse",
-                "sku": "MOUSE-001",
-                "price": 29.99,
-                "category_id": sample_category.id,
-                "stock_quantity": 100,
-            },
-        )
-        assert response.status_code == 201
-        data = response.json()
-        assert data["title"] == "Wireless Mouse"
-        assert data["sku"] == "MOUSE-001"
-
-    async def test_list_products(self, client, auth_headers, sample_category):
-        await client.post(
-            "/api/v1/products",
-            headers=auth_headers,
-            json={
-                "title": "Keyboard",
-                "sku": "KB-001",
-                "price": 79.99,
-                "category_id": sample_category.id,
-                "status": "published",
-            },
-        )
-        response = await client.get("/api/v1/products", headers=auth_headers)
-        assert response.status_code == 200
-        assert response.json()["count"] >= 1
-
-    async def test_duplicate_sku_rejected(self, client, auth_headers, sample_category):
-        payload = {
-            "title": "Product A",
-            "sku": "DUP-001",
-            "price": 10.00,
-            "category_id": sample_category.id,
-        }
-        await client.post("/api/v1/products", headers=auth_headers, json=payload)
-        response = await client.post("/api/v1/products", headers=auth_headers, json={
-            **payload, "title": "Product B",
-        })
-        assert response.status_code == 409
-
-    async def test_update_product(self, client, auth_headers, sample_category):
-        create_resp = await client.post(
-            "/api/v1/products",
-            headers=auth_headers,
-            json={
-                "title": "Old Name",
-                "sku": "UPD-001",
-                "price": 50.00,
-                "category_id": sample_category.id,
-            },
-        )
-        product_id = create_resp.json()["id"]
-        response = await client.patch(
-            f"/api/v1/products/{product_id}",
-            headers=auth_headers,
-            json={"title": "New Name", "price": 55.00},
-        )
-        assert response.status_code == 200
-        assert response.json()["title"] == "New Name"
-        assert response.json()["price"] == 55.00
-
-    async def test_delete_product(self, client, auth_headers, sample_category):
-        create_resp = await client.post(
-            "/api/v1/products",
-            headers=auth_headers,
-            json={
-                "title": "To Delete",
-                "sku": "DEL-001",
-                "price": 10.00,
-                "category_id": sample_category.id,
-            },
-        )
-        product_id = create_resp.json()["id"]
-        response = await client.delete(
-            f"/api/v1/products/{product_id}", headers=auth_headers
-        )
-        assert response.status_code == 204
-
-    async def test_filter_by_price_range(self, client, auth_headers, sample_category):
-        for i, price in enumerate([10, 50, 100]):
-            await client.post(
-                "/api/v1/products",
-                headers=auth_headers,
-                json={
-                    "title": f"Product {i}",
-                    "sku": f"PRICE-{i}",
-                    "price": price,
-                    "category_id": sample_category.id,
-                    "is_published": True,
-                    "status": "published",
-                },
+        if obj.is_remote:
+            return format_html(
+                '<span style="color:#3182ce;font-weight:bold">Remote</span>'
             )
-        response = await client.get(
-            "/api/v1/products",
-            headers=auth_headers,
-            params={"min_price": 20, "max_price": 80},
+        return format_html(
+            '<span style="color:#38a169;font-weight:bold">Active</span>'
         )
-        assert response.status_code == 200
-        for item in response.json()["results"]:
-            assert 20 <= item["price"] <= 80
+    status_badge.short_description = "Status"
+
+
+@admin.register(LeaveRequest)
+class LeaveRequestAdmin(admin.ModelAdmin):
+    list_display = [
+        "id", "employee_name", "leave_type", "status_badge",
+        "start_date", "end_date", "duration_days", "created_at",
+    ]
+    list_filter = ["leave_type", "status", "start_date"]
+    search_fields = ["employee__user__first_name", "employee__employee_id"]
+    readonly_fields = ["reviewed_by", "reviewed_at", "created_at"]
+
+    def employee_name(self, obj):
+        return obj.employee.user.get_full_name()
+
+    def status_badge(self, obj):
+        colors = {
+            "pending": "#d69e2e",
+            "approved": "#38a169",
+            "rejected": "#e53e3e",
+            "cancelled": "#718096",
+        }
+        color = colors.get(obj.status, "#718096")
+        return format_html(
+            '<span style="color:{};font-weight:bold">{}</span>',
+            color, obj.get_status_display(),
+        )
+    status_badge.short_description = "Status"
 """,
     },
     # ── Django: Middleware ──
     {
         "filename": "middleware.py",
         "code": """\
-import logging
 import time
-import uuid
-from django.utils.deprecation import MiddlewareMixin
-
-logger = logging.getLogger("api.requests")
-
-
-class RequestLoggingMiddleware(MiddlewareMixin):
-    def process_request(self, request):
-        request._start_time = time.perf_counter()
-        request._request_id = str(uuid.uuid4())[:8]
-
-    def process_response(self, request, response):
-        if not hasattr(request, "_start_time"):
-            return response
-
-        elapsed = time.perf_counter() - request._start_time
-        response["X-Request-ID"] = request._request_id
-        response["X-Process-Time"] = f"{elapsed:.4f}"
-
-        logger.info(
-            "%(method)s %(path)s %(status)s %(time).4fs [%(request_id)s]",
-            {
-                "method": request.method,
-                "path": request.get_full_path(),
-                "status": response.status_code,
-                "time": elapsed,
-                "request_id": request._request_id,
-            },
-        )
-
-        return response
-
-
-class CORSMiddleware(MiddlewareMixin):
-    ALLOWED_ORIGINS = [
-        "http://localhost:3000",
-        "http://localhost:5173",
-    ]
-
-    def process_response(self, request, response):
-        origin = request.META.get("HTTP_ORIGIN")
-        if origin in self.ALLOWED_ORIGINS:
-            response["Access-Control-Allow-Origin"] = origin
-            response["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
-            response["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
-            response["Access-Control-Allow-Credentials"] = "true"
-            response["Access-Control-Max-Age"] = "86400"
-        return response
-
-    def process_request(self, request):
-        if request.method == "OPTIONS":
-            from django.http import HttpResponse
-            response = HttpResponse()
-            origin = request.META.get("HTTP_ORIGIN")
-            if origin in self.ALLOWED_ORIGINS:
-                response["Access-Control-Allow-Origin"] = origin
-                response["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
-                response["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
-                response["Access-Control-Max-Age"] = "86400"
-            response.status_code = 204
-            return response
-        return None
-""",
-    },
-    # ── Django: Signals ──
-    {
-        "filename": "signals.py",
-        "code": """\
 import logging
-from django.db.models.signals import post_save, pre_save
-from django.dispatch import receiver
-from django.utils.text import slugify
+import json
+from django.conf import settings
+from django.http import JsonResponse
+from django.utils.deprecation import MiddlewareMixin
 from django.core.cache import cache
-
-from products.models import Product, Category
 
 logger = logging.getLogger(__name__)
 
 
-@receiver(pre_save, sender=Product)
-def auto_generate_slug(sender, instance, **kwargs):
-    if not instance.slug:
-        base_slug = slugify(instance.title)
-        slug = base_slug
-        counter = 1
-        while Product.objects.filter(slug=slug).exclude(pk=instance.pk).exists():
-            slug = f"{base_slug}-{counter}"
-            counter += 1
-        instance.slug = slug
+class RequestTimingMiddleware(MiddlewareMixin):
+    def process_request(self, request):
+        request._start_time = time.monotonic()
+
+    def process_response(self, request, response):
+        if hasattr(request, "_start_time"):
+            duration_ms = (time.monotonic() - request._start_time) * 1000
+            response["X-Response-Time"] = f"{duration_ms:.0f}ms"
+
+            if duration_ms > 2000:
+                logger.warning(
+                    "Slow request: %s %s took %.0fms",
+                    request.method, request.get_full_path(), duration_ms,
+                )
+        return response
 
 
-@receiver(post_save, sender=Product)
-def invalidate_product_cache(sender, instance, **kwargs):
-    cache_keys = [
-        f"product:{instance.pk}",
-        f"product:slug:{instance.slug}",
-        f"product_list:category:{instance.category_id}",
-        "product_stats",
-    ]
-    cache.delete_many(cache_keys)
-    logger.debug("Invalidated cache keys for product %s: %s", instance.pk, cache_keys)
+class APIRateLimitMiddleware(MiddlewareMixin):
+    LIMIT = getattr(settings, "API_RATE_LIMIT", 100)
+    WINDOW = getattr(settings, "API_RATE_WINDOW", 60)
+
+    def process_request(self, request):
+        if not request.path.startswith("/api/"):
+            return None
+
+        if hasattr(request, "user") and request.user.is_staff:
+            return None
+
+        ip = self._get_ip(request)
+        key = f"rate:{ip}"
+        count = cache.get(key, 0)
+
+        if count >= self.LIMIT:
+            logger.warning(f"Rate limit hit: {ip}")
+            return JsonResponse(
+                {"error": "Too many requests", "retry_after": self.WINDOW},
+                status=429,
+            )
+
+        cache.set(key, count + 1, self.WINDOW)
+        return None
+
+    def _get_ip(self, request):
+        xff = request.META.get("HTTP_X_FORWARDED_FOR")
+        if xff:
+            return xff.split(",")[0].strip()
+        return request.META.get("REMOTE_ADDR", "unknown")
 
 
-@receiver(post_save, sender=Product)
-def log_product_changes(sender, instance, created, **kwargs):
-    if created:
-        logger.info(
-            "Product created: %s (SKU: %s, Price: %s, Category: %s)",
-            instance.title,
-            instance.sku,
-            instance.price,
-            instance.category_id,
+class AuditLogMiddleware(MiddlewareMixin):
+    AUDIT_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+
+    def process_response(self, request, response):
+        if request.method not in self.AUDIT_METHODS:
+            return response
+        if not request.path.startswith("/api/"):
+            return response
+
+        user = "anonymous"
+        if hasattr(request, "user") and request.user.is_authenticated:
+            user = request.user.email
+
+        log_entry = {
+            "user": user,
+            "method": request.method,
+            "path": request.get_full_path(),
+            "status": response.status_code,
+        }
+
+        if response.status_code >= 400:
+            logger.warning("Audit: %s", json.dumps(log_entry))
+        else:
+            logger.info("Audit: %s", json.dumps(log_entry))
+
+        return response
+""",
+    },
+    # ── Django: Tests ──
+    {
+        "filename": "test_hr.py",
+        "code": """\
+from decimal import Decimal
+from datetime import date, timedelta
+from django.test import TestCase
+from django.contrib.auth import get_user_model
+from rest_framework.test import APIClient
+from rest_framework import status
+
+from .models import Department, Employee, LeaveRequest
+
+User = get_user_model()
+
+
+class EmployeeModelTest(TestCase):
+    def setUp(self):
+        self.dept = Department.objects.create(
+            name="Engineering", code="ENG", budget=Decimal("500000")
         )
-    else:
-        logger.info(
-            "Product updated: %s (SKU: %s, Status: %s)",
-            instance.title,
-            instance.sku,
-            instance.status,
+        self.user = User.objects.create_user(
+            username="jdoe", email="jdoe@company.com",
+            password="pass123", first_name="John", last_name="Doe",
+        )
+        self.employee = Employee.objects.create(
+            user=self.user, employee_id="EMP-001",
+            department=self.dept, role="engineer",
+            title="Senior Developer", salary=Decimal("95000"),
+            hire_date=date(2022, 3, 15),
         )
 
+    def test_employee_str(self):
+        self.assertIn("EMP-001", str(self.employee))
 
-@receiver(post_save, sender=Product)
-def notify_on_publish(sender, instance, **kwargs):
-    if instance.status == "published" and instance.is_published:
+    def test_tenure_calculation(self):
+        self.assertGreater(self.employee.tenure_days, 0)
+
+    def test_department_employee_count(self):
+        self.assertEqual(self.dept.employee_count, 1)
+
+    def test_department_salary_expense(self):
+        self.assertEqual(self.dept.total_salary_expense, Decimal("95000"))
+
+
+class LeaveRequestTest(TestCase):
+    def setUp(self):
+        self.dept = Department.objects.create(name="Design", code="DSN")
+        self.mgr_user = User.objects.create_user(
+            username="mgr", email="mgr@company.com", password="pass",
+        )
+        self.manager = Employee.objects.create(
+            user=self.mgr_user, employee_id="EMP-MGR",
+            department=self.dept, role="manager",
+            title="Design Lead", salary=Decimal("110000"),
+            hire_date=date(2020, 1, 10),
+        )
+        self.emp_user = User.objects.create_user(
+            username="emp", email="emp@company.com", password="pass",
+        )
+        self.employee = Employee.objects.create(
+            user=self.emp_user, employee_id="EMP-002",
+            department=self.dept, role="designer",
+            title="UI Designer", salary=Decimal("75000"),
+            hire_date=date(2023, 6, 1), manager=self.manager,
+        )
+
+    def test_create_leave_request(self):
+        leave = LeaveRequest.objects.create(
+            employee=self.employee, leave_type="annual",
+            start_date=date.today() + timedelta(days=10),
+            end_date=date.today() + timedelta(days=14),
+            reason="Vacation",
+        )
+        self.assertEqual(leave.status, "pending")
+        self.assertEqual(leave.duration_days, 5)
+
+    def test_approve_leave(self):
+        leave = LeaveRequest.objects.create(
+            employee=self.employee, leave_type="sick",
+            start_date=date.today() + timedelta(days=1),
+            end_date=date.today() + timedelta(days=2),
+        )
+        leave.approve(self.manager)
+        self.assertEqual(leave.status, "approved")
+        self.assertEqual(leave.reviewed_by, self.manager)
+        self.assertIsNotNone(leave.reviewed_at)
+
+    def test_reject_leave(self):
+        leave = LeaveRequest.objects.create(
+            employee=self.employee, leave_type="personal",
+            start_date=date.today() + timedelta(days=5),
+            end_date=date.today() + timedelta(days=5),
+        )
+        leave.reject(self.manager)
+        self.assertEqual(leave.status, "rejected")
+
+
+class LeaveAPITest(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.dept = Department.objects.create(name="Support", code="SUP")
+        self.user = User.objects.create_user(
+            username="agent", email="agent@company.com", password="pass",
+        )
+        self.employee = Employee.objects.create(
+            user=self.user, employee_id="EMP-003",
+            department=self.dept, role="support",
+            title="Support Agent", salary=Decimal("55000"),
+            hire_date=date(2024, 1, 15),
+        )
+
+    def test_create_leave_authenticated(self):
+        self.client.force_authenticate(user=self.user)
+        data = {
+            "leave_type": "annual",
+            "start_date": str(date.today() + timedelta(days=30)),
+            "end_date": str(date.today() + timedelta(days=34)),
+            "reason": "Family trip",
+        }
+        response = self.client.post("/api/leave-requests/", data, format="json")
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+    def test_create_leave_unauthenticated(self):
+        data = {
+            "leave_type": "sick",
+            "start_date": str(date.today() + timedelta(days=1)),
+            "end_date": str(date.today() + timedelta(days=1)),
+        }
+        response = self.client.post("/api/leave-requests/", data, format="json")
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_user_sees_only_own_leaves(self):
+        self.client.force_authenticate(user=self.user)
+        LeaveRequest.objects.create(
+            employee=self.employee, leave_type="annual",
+            start_date=date.today() + timedelta(days=10),
+            end_date=date.today() + timedelta(days=12),
+        )
+        other_user = User.objects.create_user(
+            username="other", email="other@company.com", password="pass",
+        )
+        other_emp = Employee.objects.create(
+            user=other_user, employee_id="EMP-004",
+            department=self.dept, role="support",
+            title="Agent", salary=Decimal("50000"),
+            hire_date=date(2024, 6, 1),
+        )
+        LeaveRequest.objects.create(
+            employee=other_emp, leave_type="sick",
+            start_date=date.today() + timedelta(days=5),
+            end_date=date.today() + timedelta(days=5),
+        )
+        response = self.client.get("/api/leave-requests/")
+        self.assertEqual(len(response.data["results"]), 1)
+""",
+    },
+    # ── Django: URL config ──
+    {
+        "filename": "urls.py",
+        "code": """\
+from django.urls import path, include
+from rest_framework.routers import DefaultRouter
+
+from .views import DepartmentViewSet, EmployeeViewSet, LeaveRequestViewSet
+
+router = DefaultRouter()
+router.register("departments", DepartmentViewSet, basename="department")
+router.register("employees", EmployeeViewSet, basename="employee")
+router.register("leave-requests", LeaveRequestViewSet, basename="leave-request")
+
+app_name = "hr"
+
+urlpatterns = [
+    path("api/", include(router.urls)),
+]
+""",
+    },
+    # ── Django: Permissions ──
+    {
+        "filename": "permissions.py",
+        "code": """\
+from rest_framework.permissions import BasePermission
+
+
+class IsManagerOrAdmin(BasePermission):
+    def has_permission(self, request, view):
+        if not request.user or not request.user.is_authenticated:
+            return False
+        if request.user.is_staff:
+            return True
         try:
-            from products.tasks import notify_product_published
-            notify_product_published.delay(instance.pk)
-        except Exception as exc:
-            logger.warning("Failed to queue publish notification: %s", exc)
+            employee = request.user.employee
+            return employee.role in ("manager", "admin")
+        except AttributeError:
+            return False
+
+    def has_object_permission(self, request, view, obj):
+        if request.user.is_staff:
+            return True
+        try:
+            employee = request.user.employee
+            if hasattr(obj, "employee") and obj.employee.manager == employee:
+                return True
+            return employee.role == "admin"
+        except AttributeError:
+            return False
 
 
-@receiver(pre_save, sender=Category)
-def auto_category_slug(sender, instance, **kwargs):
-    if not instance.slug:
-        base_slug = slugify(instance.name)
-        slug = base_slug
-        counter = 1
-        while Category.objects.filter(slug=slug).exclude(pk=instance.pk).exists():
-            slug = f"{base_slug}-{counter}"
-            counter += 1
-        instance.slug = slug
+class IsHRAdmin(BasePermission):
+    def has_permission(self, request, view):
+        if not request.user or not request.user.is_authenticated:
+            return False
+        if request.user.is_staff:
+            return True
+        try:
+            return request.user.employee.role == "admin"
+        except AttributeError:
+            return False
+
+
+class IsOwnerOrAdmin(BasePermission):
+    def has_object_permission(self, request, view, obj):
+        if request.user.is_staff:
+            return True
+        if hasattr(obj, "user"):
+            return obj.user == request.user
+        if hasattr(obj, "employee"):
+            return obj.employee.user == request.user
+        return False
+""",
+    },
+    # ── Django: Filters ──
+    {
+        "filename": "filters.py",
+        "code": """\
+import django_filters
+from django.db.models import Q
+
+from .models import Employee, LeaveRequest
+
+
+class EmployeeFilter(django_filters.FilterSet):
+    department = django_filters.CharFilter(field_name="department__code")
+    role = django_filters.ChoiceFilter(choices=Employee.ROLE_CHOICES)
+    hired_after = django_filters.DateFilter(field_name="hire_date", lookup_expr="gte")
+    hired_before = django_filters.DateFilter(field_name="hire_date", lookup_expr="lte")
+    min_salary = django_filters.NumberFilter(field_name="salary", lookup_expr="gte")
+    max_salary = django_filters.NumberFilter(field_name="salary", lookup_expr="lte")
+    is_remote = django_filters.BooleanFilter()
+    search = django_filters.CharFilter(method="filter_search")
+
+    class Meta:
+        model = Employee
+        fields = ["department", "role", "is_active", "is_remote"]
+
+    def filter_search(self, queryset, name, value):
+        return queryset.filter(
+            Q(user__first_name__icontains=value)
+            | Q(user__last_name__icontains=value)
+            | Q(employee_id__icontains=value)
+            | Q(user__email__icontains=value)
+        )
+
+
+class LeaveFilter(django_filters.FilterSet):
+    leave_type = django_filters.ChoiceFilter(choices=LeaveRequest.TYPE_CHOICES)
+    status = django_filters.ChoiceFilter(choices=LeaveRequest.STATUS_CHOICES)
+    employee_id = django_filters.CharFilter(field_name="employee__employee_id")
+    department = django_filters.CharFilter(field_name="employee__department__code")
+    date_from = django_filters.DateFilter(field_name="start_date", lookup_expr="gte")
+    date_to = django_filters.DateFilter(field_name="end_date", lookup_expr="lte")
+
+    class Meta:
+        model = LeaveRequest
+        fields = ["leave_type", "status"]
 """,
     },
 ]
